@@ -1,6 +1,5 @@
 package com.unciv.logic
 
-import com.badlogic.gdx.graphics.Color
 import com.unciv.Constants
 import com.unciv.UncivGame
 import com.unciv.logic.automation.NextTurnAutomation
@@ -9,6 +8,7 @@ import com.unciv.logic.city.PerpetualConstruction
 import com.unciv.logic.civilization.*
 import com.unciv.logic.map.TileInfo
 import com.unciv.logic.map.TileMap
+import com.unciv.models.Religion
 import com.unciv.models.metadata.GameParameters
 import com.unciv.models.ruleset.Difficulty
 import com.unciv.models.ruleset.Ruleset
@@ -33,6 +33,7 @@ class GameInfo {
     lateinit var ruleSet: Ruleset
 
     var civilizations = mutableListOf<CivilizationInfo>()
+    var religions: HashMap<String, Religion> = hashMapOf()
     var difficulty = "Chieftain" // difficulty is game-wide, think what would happen if 2 human players could play on different difficulties?
     var tileMap: TileMap = TileMap()
     var gameParameters = GameParameters()
@@ -41,6 +42,15 @@ class GameInfo {
     var currentPlayer = ""
     var gameId = UUID.randomUUID().toString() // random string
 
+    // Maps a civ to the civ they voted for
+    var diplomaticVictoryVotesCast = HashMap<String, String>()
+
+    /**Keep track of a custom location this game was saved to _or_ loaded from
+     *
+     * Note this was used as silent autosave destination, but it was decided (#3898) to
+     * make the custom location feature a one-shot import/export kind of operation.
+     * The tracking is left in place, however [GameSaver.autoSaveSingleThreaded] no longer uses it
+     */
     @Volatile
     var customSaveLocation: String? = null
 
@@ -57,11 +67,13 @@ class GameInfo {
         val toReturn = GameInfo()
         toReturn.tileMap = tileMap.clone()
         toReturn.civilizations.addAll(civilizations.map { it.clone() })
+        toReturn.religions.putAll(religions.map { Pair(it.key, it.value.clone()) })
         toReturn.currentPlayer = currentPlayer
         toReturn.turns = turns
         toReturn.difficulty = difficulty
         toReturn.gameParameters = gameParameters
         toReturn.gameId = gameId
+        toReturn.diplomaticVictoryVotesCast.putAll(diplomaticVictoryVotesCast)
         toReturn.oneMoreTurnMode = oneMoreTurnMode
         toReturn.customSaveLocation = customSaveLocation
         return toReturn
@@ -70,7 +82,17 @@ class GameInfo {
     fun getPlayerToViewAs(): CivilizationInfo {
         if (!gameParameters.isOnlineMultiplayer) return currentPlayerCiv // non-online, play as human player
         val userId = UncivGame.Current.settings.userId
-        if (civilizations.any { it.playerId == userId }) return civilizations.first { it.playerId == userId }
+
+        // Iterating on all civs, starting from the the current player, gives us the one that will have the next turn
+        // This allows multiple civs from the same UserID
+        if (civilizations.any { it.playerId == userId }) {
+            var civIndex = civilizations.map { it.civName }.indexOf(currentPlayer)
+            while (true) {
+                val civToCheck = civilizations[civIndex % civilizations.size]
+                if (civToCheck.playerId == userId) return civToCheck
+                civIndex++
+            }
+        }
         else return getBarbarianCivilization()// you aren't anyone. How did you even get this game? Can you spectate?
     }
 
@@ -78,7 +100,7 @@ class GameInfo {
     fun getCurrentPlayerCivilization() = currentPlayerCiv
     fun getBarbarianCivilization() = getCivilization(Constants.barbarians)
     fun getDifficulty() = difficultyObject
-    fun getCities() = civilizations.flatMap { it.cities }
+    fun getCities() = civilizations.asSequence().flatMap { it.cities }
     fun getAliveCityStates() = civilizations.filter { it.isAlive() && it.isCityState() }
     fun getAliveMajorCivs() = civilizations.filter { it.isAlive() && it.isMajorCiv() }
     //endregion
@@ -147,7 +169,7 @@ class GameInfo {
                     it.militaryUnit != null && it.militaryUnit!!.civInfo != thisPlayer
                             && thisPlayer.isAtWarWith(it.militaryUnit!!.civInfo)
                             && (it.getOwner() == thisPlayer || it.neighbors.any { neighbor -> neighbor.getOwner() == thisPlayer }
-                            && (!it.militaryUnit!!.isInvisible() || viewableInvisibleTiles.contains(it.position)))
+                            && (!it.militaryUnit!!.isInvisible(thisPlayer) || viewableInvisibleTiles.contains(it.position)))
                 }
 
         // enemy units ON our territory
@@ -224,11 +246,11 @@ class GameInfo {
         val barbarianCiv = getBarbarianCivilization()
         barbarianCiv.tech.techsResearched = allResearchedTechs.toHashSet()
         val unitList = ruleSet.units.values
-                .filter { !it.unitType.isCivilian() }
+                .filter { it.isMilitary() }
                 .filter { it.isBuildable(barbarianCiv) }
 
-        val landUnits = unitList.filter { it.unitType.isLandUnit() }
-        val waterUnits = unitList.filter { it.unitType.isWaterUnit() }
+        val landUnits = unitList.filter { it.isLandUnit() }
+        val waterUnits = unitList.filter { it.isWaterUnit() }
 
         val unit: String
         if (waterUnits.isNotEmpty() && tileToPlace.isCoastalTile() && Random().nextBoolean())
@@ -240,7 +262,7 @@ class GameInfo {
 
     /**
      * [CivilizationInfo.addNotification][Add a notification] to every civilization that have
-     * adopted Honor policy and have explored the [tile] where the Barbarian Encampent has spawned.
+     * adopted Honor policy and have explored the [tile] where the Barbarian Encampment has spawned.
      */
     fun notifyCivsOfBarbarianEncampment(tile: TileInfo) {
         civilizations.filter {
@@ -264,8 +286,19 @@ class GameInfo {
         if (missingMods.isNotEmpty()) {
             throw UncivShowableException("Missing mods: [$missingMods]")
         }
+        
+        // compatibility code translating changed tech name "Railroad" - to be deprecated soon
+        val (oldTechName, newTechName) = "Railroad" to "Railroads"
+        if (ruleSet.technologies[oldTechName] == null && ruleSet.technologies[newTechName] != null) {
+            civilizations.forEach {
+                it.tech.replaceUpdatedTechName(oldTechName, newTechName)
+            }
+        }
 
         removeMissingModReferences()
+
+        for (baseUnit in ruleSet.units.values)
+            baseUnit.ruleset = ruleSet
 
         tileMap.setTransients(ruleSet)
 
@@ -277,20 +310,8 @@ class GameInfo {
         for (civInfo in civilizations) civInfo.gameInfo = this
 
         difficultyObject = ruleSet.difficulties[difficulty]!!
-
-        // We have to remove all deprecated buildings from all cities BEFORE we update a single one, or run setTransients on the civs,
-        // because updating leads to getting the building uniques from the civ info,
-        // which in turn leads to us trying to get info on all the building in all the cities...
-        // which can fail if there's an "unregistered" building anywhere
-        for (civInfo in civilizations) {
-            // As of 3.3.7, Facism -> Fascism
-            if (civInfo.policies.adoptedPolicies.contains("Facism")) {
-                civInfo.policies.adoptedPolicies.remove("Facism")
-                civInfo.policies.adoptedPolicies.add("Fascism")
-            }
-
-        }
-
+        
+        for (religion in religions.values) religion.setTransients(this)
 
         // This doesn't HAVE to go here, but why not.
 
@@ -320,6 +341,17 @@ class GameInfo {
 
                 cityInfo.cityStats.update()
             }
+
+            if(!civInfo.greatPeople.greatPersonPoints.isEmpty()) {
+                civInfo.greatPeople.greatPersonPointsCounter.add(
+                    GreatPersonManager.statsToGreatPersonCounter(civInfo.greatPeople.greatPersonPoints)
+                )
+                civInfo.greatPeople.greatPersonPoints.clear()
+            }
+
+            if (civInfo.hasEverOwnedOriginalCapital == null) {
+                civInfo.hasEverOwnedOriginalCapital = civInfo.cities.any { it.isOriginalCapital }
+            }
         }
     }
 
@@ -332,8 +364,7 @@ class GameInfo {
                 tile.terrainFeatures.remove(terrainFeature)
             if (tile.resource != null && !ruleSet.tileResources.containsKey(tile.resource!!))
                 tile.resource = null
-            if (tile.improvement != null && !ruleSet.tileImprovements.containsKey(tile.improvement!!)
-                    && !tile.improvement!!.startsWith("StartingLocation ")) // To not remove the starting locations in GameStarter.startNewGame()
+            if (tile.improvement != null && !ruleSet.tileImprovements.containsKey(tile.improvement!!))
                 tile.improvement = null
 
             for (unit in tile.getUnits()) {
@@ -346,11 +377,14 @@ class GameInfo {
         }
 
         for (city in civilizations.asSequence().flatMap { it.cities.asSequence() }) {
+            
             for (building in city.cityConstructions.builtBuildings.toHashSet())
                 if (!ruleSet.buildings.containsKey(building))
                     city.cityConstructions.builtBuildings.remove(building)
 
-            fun isInvalidConstruction(construction: String) = !ruleSet.buildings.containsKey(construction) && !ruleSet.units.containsKey(construction)
+            fun isInvalidConstruction(construction: String) = 
+                    !ruleSet.buildings.containsKey(construction) 
+                    && !ruleSet.units.containsKey(construction)
                     && !PerpetualConstruction.perpetualConstructionsMap.containsKey(construction)
 
             // Remove invalid buildings or units from the queue - don't just check buildings and units because it might be a special construction as well
@@ -368,21 +402,64 @@ class GameInfo {
             for (tech in civinfo.tech.techsResearched.toList())
                 if (!ruleSet.technologies.containsKey(tech))
                     civinfo.tech.techsResearched.remove(tech)
-            for (policy in civinfo.policies.adoptedPolicies.toList())
-                if (!ruleSet.policies.containsKey(policy))
-                    civinfo.policies.adoptedPolicies.remove(policy)
         }
     }
 
-    private fun changeBuildingName(cityConstructions: CityConstructions, oldBuildingName: String, newBuildingName: String) {
+    /**
+     * Replaces all occurrences of [oldBuildingName] in [cityConstructions] with [newBuildingName]
+     * if the former is not contained in the ruleset.
+     * This function can be used for backwards compatibility with older save files when a building
+     * name is changed.
+     */
+    @Suppress("unused")   // it's OK if there's no deprecation currently needing this
+    private fun changeBuildingNameIfNotInRuleset(cityConstructions: CityConstructions, oldBuildingName: String, newBuildingName: String) {
+        if (ruleSet.buildings.containsKey(oldBuildingName))
+            return
+        // Replace in built buildings
         if (cityConstructions.builtBuildings.contains(oldBuildingName)) {
             cityConstructions.builtBuildings.remove(oldBuildingName)
             cityConstructions.builtBuildings.add(newBuildingName)
         }
-        cityConstructions.constructionQueue.replaceAll { if (it == oldBuildingName) newBuildingName else it }
+        // Replace in construction queue
+        if (!cityConstructions.builtBuildings.contains(newBuildingName) && !cityConstructions.constructionQueue.contains(newBuildingName))
+            cityConstructions.constructionQueue = cityConstructions.constructionQueue.map{ if (it == oldBuildingName) newBuildingName else it }.toMutableList()
+        else
+            cityConstructions.constructionQueue.remove(oldBuildingName)
+        // Replace in in-progress constructions
         if (cityConstructions.inProgressConstructions.containsKey(oldBuildingName)) {
-            cityConstructions.inProgressConstructions[newBuildingName] = cityConstructions.inProgressConstructions[oldBuildingName]!!
+            if (!cityConstructions.builtBuildings.contains(newBuildingName) && !cityConstructions.inProgressConstructions.containsKey(newBuildingName))
+                cityConstructions.inProgressConstructions[newBuildingName] = cityConstructions.inProgressConstructions[oldBuildingName]!!
             cityConstructions.inProgressConstructions.remove(oldBuildingName)
         }
     }
+
+    /** Replace a changed tech name, only temporarily used for breaking ruleset updates */
+    private fun TechManager.replaceUpdatedTechName(oldTechName: String, newTechName: String) {
+        if (oldTechName in techsResearched) {
+            techsResearched.remove(oldTechName)
+            techsResearched.add(newTechName)
+        }
+        val index = techsToResearch.indexOf(oldTechName)
+        if (index >= 0) {
+            techsToResearch[index] = newTechName
+        }
+        if (oldTechName in techsInProgress) {
+            techsInProgress[newTechName] = researchOfTech(oldTechName)
+            techsInProgress.remove(oldTechName)
+        }
+    }
+
+
+    fun hasReligionEnabled() = gameParameters.religionEnabled || ruleSet.hasReligion() // Temporary function to check whether religion should be used for this game
+}
+
+// reduced variant only for load preview
+class GameInfoPreview {
+    var civilizations = mutableListOf<CivilizationInfoPreview>()
+    var difficulty = "Chieftain"
+    var gameParameters = GameParameters()
+    var turns = 0
+    var gameId = ""
+    var currentPlayer = ""
+    fun getCivilization(civName: String) = civilizations.first { it.civName == civName }
 }

@@ -2,13 +2,10 @@ package com.unciv.ui.cityscreen
 
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.scenes.scene2d.ui.Table
-import com.unciv.Constants
+import com.badlogic.gdx.utils.Align
 import com.unciv.models.stats.Stat
 import com.unciv.models.translations.tr
-import com.unciv.ui.utils.ImageGetter
-import com.unciv.ui.utils.addSeparator
-import com.unciv.ui.utils.colorFromRGB
-import com.unciv.ui.utils.toLabel
+import com.unciv.ui.utils.*
 import kotlin.math.ceil
 import kotlin.math.round
 
@@ -30,25 +27,31 @@ class CityStatsTable(val cityScreen: CityScreen): Table() {
     fun update() {
         innerTable.clear()
 
-        val ministatsTable = Table()
-        for (stat in cityInfo.cityStats.currentCityStats.toHashMap()) {
-            if (stat.key == Stat.Happiness || stat.key == Stat.Faith) continue
-            ministatsTable.add(ImageGetter.getStatIcon(stat.key.name)).size(20f).padRight(5f)
-            ministatsTable.add(round(stat.value).toInt().toString().toLabel()).padRight(10f)
+        val miniStatsTable = Table()
+        for ((stat, amount) in cityInfo.cityStats.currentCityStats) {
+            if (stat == Stat.Faith && !cityInfo.civInfo.gameInfo.hasReligionEnabled()) continue
+            miniStatsTable.add(ImageGetter.getStatIcon(stat.name)).size(20f).padRight(5f)
+            val valueToDisplay = if (stat == Stat.Happiness) cityInfo.cityStats.happinessList.values.sum() else amount
+            miniStatsTable.add(round(valueToDisplay).toInt().toLabel()).padRight(10f)
         }
-        innerTable.add(ministatsTable)
+        innerTable.add(miniStatsTable)
 
         innerTable.addSeparator()
         addText()
-        innerTable.addSeparator()
-        innerTable.add(SpecialistAllocationTable(cityScreen).apply { update() })
+        if (!cityInfo.population.getMaxSpecialists().isEmpty()) {
+            innerTable.addSeparator()
+            innerTable.add(SpecialistAllocationTable(cityScreen).apply { update() }).row()
+        }
+        
+        if (cityInfo.religion.getNumberOfFollowers().isNotEmpty())
+            addReligionInfo()
 
         pack()
     }
 
     private fun addText() {
-        val unassignedPopString = "{Unassigned population}:".tr() +
-                " " + cityInfo.population.getFreePopulation().toString() + "/" + cityInfo.population.population
+        val unassignedPopString = "{Unassigned population}: ".tr() +
+                cityInfo.population.getFreePopulation().toString() + "/" + cityInfo.population.population
 
         var turnsToExpansionString =
                 if (cityInfo.cityStats.currentCityStats.culture > 0 && cityInfo.expansion.chooseNewTileToOwn() != null) {
@@ -56,28 +59,82 @@ class CityStatsTable(val cityScreen: CityScreen): Table() {
                     var turnsToExpansion = ceil(remainingCulture / cityInfo.cityStats.currentCityStats.culture).toInt()
                     if (turnsToExpansion < 1) turnsToExpansion = 1
                     "[$turnsToExpansion] turns to expansion".tr()
-                } else {
-                    "Stopped expansion".tr()
-                }
+                } else "Stopped expansion".tr()
         if (cityInfo.expansion.chooseNewTileToOwn() != null)
-            turnsToExpansionString += " (" + cityInfo.expansion.cultureStored + "/" +
-                    cityInfo.expansion.getCultureToNextTile() + ")"
+            turnsToExpansionString +=
+                    " (${cityInfo.expansion.cultureStored}/${cityInfo.expansion.getCultureToNextTile()})"
 
         var turnsToPopString =
                 when {
-                    cityInfo.isGrowing() -> "[${cityInfo.getNumTurnsToNewPopulation()}] turns to new population".tr()
-                    cityInfo.isStarving() -> "[${cityInfo.getNumTurnsToStarvation()}] turns to lose population".tr()
+                    cityInfo.isGrowing() -> "[${cityInfo.getNumTurnsToNewPopulation()}] turns to new population"
+                    cityInfo.isStarving() -> "[${cityInfo.getNumTurnsToStarvation()}] turns to lose population"
                     cityInfo.getRuleset().units[cityInfo.cityConstructions.currentConstructionFromQueue]
                             .let { it != null && it.uniques.contains("Excess Food converted to Production when under construction") }
-                    -> "Food converts to production".tr()
-                    else -> "Stopped population growth".tr()
-                }
-        turnsToPopString += " (" + cityInfo.population.foodStored + "/" + cityInfo.population.getFoodToNextPopulation() + ")"
+                    -> "Food converts to production"
+                    else -> "Stopped population growth"
+                }.tr()
+        turnsToPopString += " (${cityInfo.population.foodStored}/${cityInfo.population.getFoodToNextPopulation()})"
 
         innerTable.add(unassignedPopString.toLabel()).row()
         innerTable.add(turnsToExpansionString.toLabel()).row()
         innerTable.add(turnsToPopString.toLabel()).row()
         if (cityInfo.isInResistance())
             innerTable.add("In resistance for another [${cityInfo.resistanceCounter}] turns".toLabel()).row()
+    }
+
+    private fun addReligionInfo() {
+        val label = cityInfo.religion.getMajorityReligion()?.iconName
+            ?: "None"
+        val icon = if (label == "None") "Religion" else label
+        val expanderTab =
+            ExpanderTab(
+                title = "Majority Religion: [$label]",
+                fontSize = 18,
+                icon = ImageGetter.getCircledReligionIcon(icon, 30f),
+                defaultPad = 0f,
+                persistenceID = "CityStatsTable.Religion",
+                startsOutOpened = false,
+                onChange = {
+                    pack()
+                    // We have to re-anchor as our position in the city screen, otherwise it expands upwards.
+                    // ToDo: This probably should be refactored so its placed somewhere else in due time
+                    setPosition(stage.width - CityScreen.posFromEdge, stage.height - CityScreen.posFromEdge, Align.topRight)
+                }
+            ) {
+                it.add(getReligionsTable()).colspan(2).pad(5f)
+            }
+        
+        innerTable.add(expanderTab).growX().row()
+    }
+    
+    private fun getReligionsTable(): Table {
+        val gridColor = Color.DARK_GRAY
+        val religionsTable = Table(CameraStageBaseScreen.skin)
+        val followers = cityInfo.religion.getNumberOfFollowers()
+        val futurePressures = cityInfo.religion.getPressuresFromSurroundingCities()
+        
+        religionsTable.add().pad(5f)
+        religionsTable.addSeparatorVertical(gridColor)
+        religionsTable.add("Followers".toLabel()).pad(5f)
+        religionsTable.addSeparatorVertical(gridColor)
+        religionsTable.add("Pressure".toLabel()).pad(5f)
+        religionsTable.row()
+        religionsTable.addSeparator(gridColor)
+        
+        for ((religion, followerCount) in followers) {
+            religionsTable.add(
+                ImageGetter.getCircledReligionIcon(cityInfo.civInfo.gameInfo.religions[religion]!!.iconName, 30f)
+            ).pad(5f)
+            religionsTable.addSeparatorVertical(gridColor)
+            religionsTable.add(followerCount.toLabel()).pad(5f)
+            religionsTable.addSeparatorVertical(gridColor)
+            if (futurePressures.containsKey(religion))
+                religionsTable.add(("+ [${futurePressures[religion]!!}] pressure").toLabel()).pad(5f)
+            else
+                religionsTable.add()
+            religionsTable.row()
+        }
+        
+        return religionsTable
     }
 }

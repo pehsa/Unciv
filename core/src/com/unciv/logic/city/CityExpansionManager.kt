@@ -1,8 +1,11 @@
 package com.unciv.logic.city
 
+import com.badlogic.gdx.math.Vector2
 import com.unciv.logic.automation.Automation
+import com.unciv.logic.civilization.LocationAction
 import com.unciv.logic.civilization.NotificationIcon
 import com.unciv.logic.map.TileInfo
+import com.unciv.ui.utils.toPercent
 import com.unciv.ui.utils.withItem
 import com.unciv.ui.utils.withoutItem
 import kotlin.math.max
@@ -33,12 +36,17 @@ class CityExpansionManager {
     // The second seems to be more based, so I'll go with that
     fun getCultureToNextTile(): Int {
         var cultureToNextTile = 6 * (max(0, tilesClaimed()) + 1.4813).pow(1.3)
-        for (unique in cityInfo.civInfo.getMatchingUniques("-[]% Culture cost of acquiring tiles []")) {
-            if (cityInfo.matchesFilter(unique.params[1]))
-                cultureToNextTile *= (100 - unique.params[0].toFloat()) / 100
-        }
 
-        if (cityInfo.civInfo.hasUnique("Increased rate of border expansion")) cultureToNextTile *= 0.75
+        if (cityInfo.civInfo.isCityState())
+            cultureToNextTile *= 1.5f   // City states grow slower, perhaps 150% cost?
+
+        for (unique in cityInfo.getMatchingUniques("-[]% Culture cost of acquiring tiles []")) {
+            if (cityInfo.matchesFilter(unique.params[1]))
+                cultureToNextTile /= unique.params[0].toPercent()
+        }
+        
+        for (unique in cityInfo.getMatchingUniques("[]% cost of natural border growth")) 
+            cultureToNextTile *= unique.params[0].toPercent()
 
         return cultureToNextTile.roundToInt()
     }
@@ -49,7 +57,7 @@ class CityExpansionManager {
         class NotEnoughGoldToBuyTileException : Exception()
         if (cityInfo.civInfo.gold < goldCost && !cityInfo.civInfo.gameInfo.gameParameters.godMode)
             throw NotEnoughGoldToBuyTileException()
-        cityInfo.civInfo.gold -= goldCost
+        cityInfo.civInfo.addGold(-goldCost)
         takeOwnership(tileInfo)
     }
 
@@ -58,26 +66,25 @@ class CityExpansionManager {
         val distanceFromCenter = tileInfo.aerialDistanceTo(cityInfo.getCenterTile())
         var cost = baseCost * (distanceFromCenter - 1) + tilesClaimed() * 5.0
 
-        for (unique in cityInfo.civInfo.getMatchingUniques("-[]% Gold cost of acquiring tiles []")) {
+        for (unique in cityInfo.getMatchingUniques("-[]% Gold cost of acquiring tiles []")) {
             if (cityInfo.matchesFilter(unique.params[1]))
                 cost *= (100 - unique.params[0].toFloat()) / 100
         }
         return cost.roundToInt()
     }
 
-
     fun chooseNewTileToOwn(): TileInfo? {
-        for (i in 2..5) {
-            val tiles = cityInfo.getCenterTile().getTilesInDistance(i)
-                    .filter {
-                        it.getOwner() == null
-                                && it.neighbors.any { tile -> tile.getCity() == cityInfo }
-                    }
-            val chosenTile = tiles.maxBy { Automation.rankTile(it, cityInfo.civInfo) }
-            if (chosenTile != null)
-                return chosenTile
+        val choosableTiles = cityInfo.getCenterTile().getTilesInDistance(5)
+            .filter { it.getOwner() == null }
+        
+        // Technically, in the original a random tile with the lowest score was selected
+        // However, doing this requires either caching it, which is way more work,
+        // or selecting all possible tiles and only choosing one when the border expands.
+        // But since the order in which tiles are selected in distance is kinda random anyways,
+        // this is fine.
+        return choosableTiles.minByOrNull {
+            Automation.rankTileForExpansion(it, cityInfo)
         }
-        return null
     }
 
     //region state-changing functions
@@ -95,16 +102,21 @@ class CityExpansionManager {
             takeOwnership(tile)
     }
 
-    private fun addNewTileWithCulture(): Boolean {
+    private fun addNewTileWithCulture(): Vector2? {
         val chosenTile = chooseNewTileToOwn()
         if (chosenTile != null) {
             cultureStored -= getCultureToNextTile()
             takeOwnership(chosenTile)
-            return true
+            return chosenTile.position
         }
-        return false
+        return null
     }
 
+    /**
+     * Removes one tile from this city's owned tiles, unconditionally, and updates dependent
+     * things like worked tiles, locked tiles, and stats.
+     * @param tileInfo The tile to relinquish
+     */
     fun relinquishOwnership(tileInfo: TileInfo) {
         cityInfo.tiles = cityInfo.tiles.withoutItem(tileInfo.position)
         for (city in cityInfo.civInfo.cities) {
@@ -122,6 +134,14 @@ class CityExpansionManager {
         cityInfo.cityStats.update()
     }
 
+    /**
+     * Takes one tile into possession of this city, either unowned or owned by any other city.
+     *
+     * Also manages consequences like auto population reassign, stats, and displacing units
+     * that are no longer allowed on that tile.
+     *
+     * @param tileInfo The tile to take over
+     */
     fun takeOwnership(tileInfo: TileInfo) {
         if (tileInfo.isCityCenter()) throw Exception("What?!")
         if (tileInfo.getCity() != null)
@@ -133,8 +153,8 @@ class CityExpansionManager {
         cityInfo.civInfo.updateDetailedCivResources()
         cityInfo.cityStats.update()
 
-        for (unit in tileInfo.getUnits().toList()) // tolisted because we're modifying
-            if (!unit.civInfo.canEnterTiles(cityInfo.civInfo))
+        for (unit in tileInfo.getUnits().toList()) // toListed because we're modifying
+            if (!unit.civInfo.canPassThroughTiles(cityInfo.civInfo))
                 unit.movement.teleportToClosestMoveableTile()
 
         cityInfo.civInfo.updateViewableTiles()
@@ -142,8 +162,13 @@ class CityExpansionManager {
 
     fun nextTurn(culture: Float) {
         cultureStored += culture.toInt()
-        if (cultureStored >= getCultureToNextTile() && addNewTileWithCulture())
-            cityInfo.civInfo.addNotification("[" + cityInfo.name + "] has expanded its borders!", cityInfo.location, NotificationIcon.Culture)
+        if (cultureStored >= getCultureToNextTile()) {
+            val location = addNewTileWithCulture()
+            if (location != null) {
+                val locations = LocationAction(listOf(location, cityInfo.location))
+                cityInfo.civInfo.addNotification("[" + cityInfo.name + "] has expanded its borders!", locations, NotificationIcon.Culture)
+            }
+        }
     }
 
     fun setTransients() {

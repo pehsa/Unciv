@@ -33,7 +33,9 @@ enum class Tutorial(val value: String, val isCivilopedia: Boolean = !value.start
     NaturalWonders("Natural_Wonders"),
     CityExpansion("City_Expansion"),
     GreatPeople("Great_People"),
-    RemovingTerrainFeatures("Removing_Terrain_Features")
+    RemovingTerrainFeatures("Removing_Terrain_Features"),
+    Keyboard("Keyboard"),
+    WorldScreen("World_Screen"),
     ;
 
     companion object {

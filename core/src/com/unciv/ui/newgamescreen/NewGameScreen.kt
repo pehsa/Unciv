@@ -2,6 +2,7 @@ package com.unciv.ui.newgamescreen
 
 import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.files.FileHandle
+import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.scenes.scene2d.ui.SelectBox
 import com.badlogic.gdx.scenes.scene2d.ui.Skin
 import com.badlogic.gdx.utils.Array
@@ -37,33 +38,27 @@ class GameSetupInfo(var gameId:String, var gameParameters: GameParameters, var m
     }
 }
 
-class NewGameScreen(previousScreen:CameraStageBaseScreen, _gameSetupInfo: GameSetupInfo?=null): IPreviousScreen, PickerScreen() {
+class NewGameScreen(
+    private val previousScreen: CameraStageBaseScreen,
+    _gameSetupInfo: GameSetupInfo? = null
+): IPreviousScreen, PickerScreen() {
+
     override val gameSetupInfo = _gameSetupInfo ?: GameSetupInfo()
-    override var ruleset = RulesetCache.getComplexRuleset(gameSetupInfo.gameParameters.mods) // needs to be set because the gameoptionstable etc. depend on this
-    var newGameOptionsTable = GameOptionsTable(this) { desiredCiv: String -> playerPickerTable.update(desiredCiv) }
+    override var ruleset = RulesetCache.getComplexRuleset(gameSetupInfo.gameParameters.mods) // needs to be set because the GameOptionsTable etc. depend on this
+    private val newGameOptionsTable = GameOptionsTable(this, isNarrowerThan4to3()) { desiredCiv: String -> playerPickerTable.update(desiredCiv) }
 
     // Has to be defined before the mapOptionsTable, since the mapOptionsTable refers to it on init
-    var playerPickerTable = PlayerPickerTable(this, gameSetupInfo.gameParameters)
-    var mapOptionsTable = MapOptionsTable(this)
-
+    private val playerPickerTable = PlayerPickerTable(
+        this, gameSetupInfo.gameParameters,
+        if (isNarrowerThan4to3()) stage.width - 20f else 0f
+    )
+    private val mapOptionsTable = MapOptionsTable(this)
 
     init {
         setDefaultCloseAction(previousScreen)
-        scrollPane.setScrollingDisabled(true, true)
 
-        topTable.add(ScrollPane(newGameOptionsTable, skin).apply { setOverscroll(false, false) })
-                .maxHeight(topTable.parent.height).width(stage.width / 3).padTop(20f).top()
-        topTable.addSeparatorVertical()
-        topTable.add(ScrollPane(mapOptionsTable, skin).apply { setOverscroll(false, false) })
-                .maxHeight(topTable.parent.height).width(stage.width / 3).padTop(20f).top()
-        topTable.addSeparatorVertical()
-        topTable.add(ScrollPane(playerPickerTable, skin)
-                .apply { setOverscroll(false, false) }
-                .apply { setScrollingDisabled(true, false) })
-                .maxHeight(topTable.parent.height).width(stage.width / 3).padTop(20f).top()
-
-        topTable.pack()
-        topTable.setFillParent(true)
+        if (isNarrowerThan4to3()) initPortrait()
+        else initLandscape()
 
         updateRuleset()
 
@@ -94,21 +89,33 @@ class NewGameScreen(previousScreen:CameraStageBaseScreen, _gameSetupInfo: GameSe
 
             Gdx.input.inputProcessor = null // remove input processing - nothing will be clicked!
 
-
             if (mapOptionsTable.mapTypeSelectBox.selected.value == MapType.custom){
                 val map = MapSaver.loadMap(gameSetupInfo.mapFile!!)
-                val rulesetIncompatibilities = HashSet<String>()
-                for (set in map.values.map { it.getRulesetIncompatibility(ruleset) })
-                    rulesetIncompatibilities.addAll(set)
-                rulesetIncompatibilities.remove("")
+                val rulesetIncompatibilities = map.getRulesetIncompatibility(ruleset)
 
                 if (rulesetIncompatibilities.isNotEmpty()) {
                     val incompatibleMap = Popup(this)
                     incompatibleMap.addGoodSizedLabel("Map is incompatible with the chosen ruleset!".tr()).row()
-                    for(incompat in rulesetIncompatibilities)
-                        incompatibleMap.addGoodSizedLabel(incompat).row()
+                    for(incompatibility in rulesetIncompatibilities)
+                        incompatibleMap.addGoodSizedLabel(incompatibility).row()
                     incompatibleMap.addCloseButton()
                     incompatibleMap.open()
+                    game.setScreen(this) // to get the input back
+                    return@onClick
+                }
+            } else {
+                // Generated map - check for sensible dimensions and if exceeded correct them and notify user
+                val mapSize = gameSetupInfo.mapParameters.mapSize
+                val message = mapSize.fixUndesiredSizes(gameSetupInfo.mapParameters.worldWrap)
+                if (message != null) {
+                    Gdx.app.postRunnable {
+                        ToastPopup( message, UncivGame.Current.screen as CameraStageBaseScreen, 4000 )
+                        with (mapOptionsTable.generatedMapOptionsTable) {
+                            customMapSizeRadius.text = mapSize.radius.toString()
+                            customMapWidth.text = mapSize.width.toString()
+                            customMapHeight.text = mapSize.height.toString()
+                        }
+                    }
                     game.setScreen(this) // to get the input back
                     return@onClick
                 }
@@ -124,16 +131,62 @@ class NewGameScreen(previousScreen:CameraStageBaseScreen, _gameSetupInfo: GameSe
         }
     }
 
+    private fun initLandscape() {
+        scrollPane.setScrollingDisabled(true,true)
+
+        topTable.add("Game Options".toLabel(fontSize = 24)).pad(20f, 0f)
+        topTable.addSeparatorVertical(Color.BLACK, 1f)
+        topTable.add("Map Options".toLabel(fontSize = 24)).pad(20f,0f)
+        topTable.addSeparatorVertical(Color.BLACK, 1f)
+        topTable.add("Civilizations".toLabel(fontSize = 24)).pad(20f,0f)
+        topTable.addSeparator(Color.CLEAR, height = 1f)
+
+        topTable.add(ScrollPane(newGameOptionsTable)
+                .apply { setOverscroll(false, false) })
+                .width(stage.width / 3).top()
+        topTable.addSeparatorVertical(Color.CLEAR, 1f)
+        topTable.add(ScrollPane(mapOptionsTable)
+                .apply { setOverscroll(false, false) })
+                .width(stage.width / 3).top()
+        topTable.addSeparatorVertical(Color.CLEAR, 1f)
+        topTable.add(playerPickerTable)  // No ScrollPane, PlayerPickerTable has its own
+                .width(stage.width / 3).top()
+    }
+    
+    private fun initPortrait() {
+        scrollPane.setScrollingDisabled(false,false)
+
+        topTable.add(ExpanderTab("Game Options") {
+            it.add(newGameOptionsTable).row()
+        }).expandX().fillX().row()
+        topTable.addSeparator(Color.DARK_GRAY, height = 1f)
+
+        topTable.add(newGameOptionsTable.getModCheckboxes(isPortrait = true)).expandX().fillX().row()
+        topTable.addSeparator(Color.DARK_GRAY, height = 1f)
+        
+        topTable.add(ExpanderTab("Map Options") {
+            it.add(mapOptionsTable).row()
+        }).expandX().fillX().row()
+        topTable.addSeparator(Color.DARK_GRAY, height = 1f)
+
+        (playerPickerTable.playerListTable.parent as ScrollPane).setScrollingDisabled(true,true)
+        topTable.add(ExpanderTab("Civilizations") {
+            it.add(playerPickerTable).row()
+        }).expandX().fillX().row()
+    }
+
     private fun newGameThread() {
         try {
             newGame = GameStarter.startNewGame(gameSetupInfo)
         } catch (exception: Exception) {
+            exception.printStackTrace()
             Gdx.app.postRunnable {
-                val cantMakeThatMapPopup = Popup(this)
-                cantMakeThatMapPopup.addGoodSizedLabel("It looks like we can't make a map with the parameters you requested!".tr()).row()
-                cantMakeThatMapPopup.addGoodSizedLabel("Maybe you put too many players into too small a map?".tr()).row()
-                cantMakeThatMapPopup.addCloseButton()
-                cantMakeThatMapPopup.open()
+                Popup(this).apply {
+                    addGoodSizedLabel("It looks like we can't make a map with the parameters you requested!".tr()).row()
+                    addGoodSizedLabel("Maybe you put too many players into too small a map?".tr()).row()
+                    addCloseButton()
+                    open()
+                }
                 Gdx.input.inputProcessor = stage
                 rightSideButton.enable()
                 rightSideButton.setText("Start game!".tr())
@@ -156,10 +209,11 @@ class NewGameScreen(previousScreen:CameraStageBaseScreen, _gameSetupInfo: GameSe
                 GameSaver.saveGame(newGame!!, newGame!!.gameId, true)
             } catch (ex: Exception) {
                 Gdx.app.postRunnable {
-                    val cantUploadNewGamePopup = Popup(this)
-                    cantUploadNewGamePopup.addGoodSizedLabel("Could not upload game!")
-                    cantUploadNewGamePopup.addCloseButton()
-                    cantUploadNewGamePopup.open()
+                    Popup(this).apply {
+                        addGoodSizedLabel("Could not upload game!")
+                        addCloseButton()
+                        open()
+                    }
                 }
                 newGame = null
             }
@@ -194,9 +248,17 @@ class NewGameScreen(previousScreen:CameraStageBaseScreen, _gameSetupInfo: GameSe
     var newGame: GameInfo? = null
 
     override fun render(delta: Float) {
-        if (newGame != null)
+        if (newGame != null) {
             game.loadGame(newGame!!)
+            previousScreen.dispose()
+        }
         super.render(delta)
+    }
+
+    override fun resize(width: Int, height: Int) {
+        if (stage.viewport.screenWidth != width || stage.viewport.screenHeight != height) {
+            game.setScreen(NewGameScreen(previousScreen, gameSetupInfo))
+        }
     }
 }
 

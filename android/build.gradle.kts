@@ -7,8 +7,7 @@ plugins {
 }
 
 android {
-    buildToolsVersion("29.0.2")
-    compileSdkVersion(29)
+    compileSdkVersion(31)
     sourceSets {
         getByName("main").apply {
             manifest.srcFile("AndroidManifest.xml")
@@ -21,12 +20,12 @@ android {
         }
     }
     packagingOptions {
-        exclude("META-INF/robovm/ios/robovm.xml")
+        resources.excludes.add("META-INF/robovm/ios/robovm.xml")
     }
     defaultConfig {
         applicationId = "com.unciv.app"
-        minSdkVersion(14)
-        targetSdkVersion(29)
+        minSdk = 14
+        targetSdk =31
         versionCode = BuildConfig.appCodeNumber
         versionName = BuildConfig.appVersion
 
@@ -57,12 +56,16 @@ android {
         }
 
     }
-    aaptOptions {
+    lint {
+        disable("MissingTranslation")
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_7
+        targetCompatibility = JavaVersion.VERSION_1_7
+    }
+    androidResources {
         // Don't add local save files and fonts to release, obviously
         ignoreAssetsPattern = "!SaveFiles:!fonts:!maps:!music:!mods"
-    }
-    lintOptions {
-        disable("MissingTranslation")
     }
 }
 
@@ -74,21 +77,11 @@ task("copyAndroidNatives") {
     val natives: Configuration by configurations
 
     doFirst {
-        file("libs/armeabi/").mkdirs()
-        file("libs/armeabi-v7a/").mkdirs()
-        file("libs/arm64-v8a/").mkdirs()
-        file("libs/x86_64/").mkdirs()
-        file("libs/x86/").mkdirs()
+        val rx = Regex(""".*natives-([^.]+)\.jar$""")
         natives.forEach { jar ->
-            val outputDir: File? = when {
-                jar.name.endsWith("natives-arm64-v8a.jar") -> file("libs/arm64-v8a")
-                jar.name.endsWith("natives-armeabi-v7a.jar") -> file("libs/armeabi-v7a")
-                jar.name.endsWith("natives-armeabi.jar") -> file("libs/armeabi")
-                jar.name.endsWith("natives-x86_64.jar") -> file("libs/x86_64")
-                jar.name.endsWith("natives-x86.jar") -> file("libs/x86")
-                else -> null
-            }
-            outputDir?.let {
+            if (rx.matches(jar.name)) {
+                val outputDir = file(rx.replace(jar.name) { "libs/" + it.groups[1]!!.value })
+                outputDir.mkdirs()
                 copy {
                     from(zipTree(jar))
                     into(outputDir)
@@ -100,7 +93,8 @@ task("copyAndroidNatives") {
 }
 
 tasks.whenTaskAdded {
-    if ("package" in name) {
+    // See https://github.com/yairm210/Unciv/issues/4842
+    if ("package" in name || "assemble" in name || "bundleRelease" in name) {
         dependsOn("copyAndroidNatives")
     }
 }
@@ -126,29 +120,8 @@ tasks.register<JavaExec>("run") {
 }
 
 dependencies {
-    implementation("androidx.core:core:1.2.0")
-    implementation("androidx.work:work-runtime-ktx:2.3.2")
-}
-
-// sets up the Android Eclipse project, using the old Ant based build.
-eclipse {
-    jdt {
-        sourceCompatibility = JavaVersion.VERSION_1_6
-        targetCompatibility = JavaVersion.VERSION_1_6
-    }
-
-    classpath {
-        plusConfigurations = plusConfigurations.apply { add(project.configurations.compile.get()) }
-        containers("com.android.ide.eclipse.adt.ANDROID_FRAMEWORK", "com.android.ide.eclipse.adt.LIBRARIES")
-    }
-
-    project {
-        name = "${BuildConfig.appName}-android"
-        natures("com.android.ide.eclipse.adt.AndroidNature")
-        buildCommands.clear()
-        buildCommand("com.android.ide.eclipse.adt.ResourceManagerBuilder")
-        buildCommand("com.android.ide.eclipse.adt.PreCompilerBuilder")
-        buildCommand("org.eclipse.jdt.core.javabuilder")
-        buildCommand("com.android.ide.eclipse.adt.ApkBuilder")
-    }
+    // Updating to latest version would require upgrading sourceCompatability and targetCompatability to 1_8 -
+    //   run `./gradlew build --scan` to see details
+    implementation("androidx.core:core-ktx:1.3.2")
+    implementation("androidx.work:work-runtime-ktx:2.6.0-alpha02")
 }

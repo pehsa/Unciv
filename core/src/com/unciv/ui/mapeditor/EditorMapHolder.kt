@@ -18,7 +18,7 @@ class EditorMapHolder(private val mapEditorScreen: MapEditorScreen, internal val
     private val allTileGroups = ArrayList<TileGroup>()
 
     init {
-        continousScrollingX = tileMap.mapParameters.worldWrap
+        continuousScrollingX = tileMap.mapParameters.worldWrap
     }
 
     internal fun addTiles(leftAndRightPadding: Float, topAndBottomPadding: Float) {
@@ -26,12 +26,12 @@ class EditorMapHolder(private val mapEditorScreen: MapEditorScreen, internal val
         val tileSetStrings = TileSetStrings()
         val daTileGroups = tileMap.values.map { TileGroup(it, tileSetStrings) }
 
-        tileGroupMap = TileGroupMap(daTileGroups, leftAndRightPadding, topAndBottomPadding, continousScrollingX)
+        tileGroupMap = TileGroupMap(daTileGroups, leftAndRightPadding, topAndBottomPadding, continuousScrollingX)
         actor = tileGroupMap
         val mirrorTileGroups = tileGroupMap.getMirrorTiles()
 
         for (tileGroup in daTileGroups) {
-            if (continousScrollingX){
+            if (continuousScrollingX){
                 val mirrorTileGroupLeft = mirrorTileGroups[tileGroup.tileInfo]!!.first
                 val mirrorTileGroupRight = mirrorTileGroups[tileGroup.tileInfo]!!.second
 
@@ -57,10 +57,10 @@ class EditorMapHolder(private val mapEditorScreen: MapEditorScreen, internal val
             tileGroup.update()
             tileGroup.onClick {
 
-                val distance = mapEditorScreen.tileEditorOptions.brushSize - 1
+                val distance = mapEditorScreen.mapEditorOptionsTable.brushSize - 1
 
                 for (tileInfo in mapEditorScreen.tileMap.getTilesInDistance(tileGroup.tileInfo.position, distance)) {
-                    mapEditorScreen.tileEditorOptions.updateTileWhenClicked(tileInfo)
+                    mapEditorScreen.mapEditorOptionsTable.updateTileWhenClicked(tileInfo)
 
                     tileInfo.setTerrainTransients()
                     tileGroups[tileInfo]!!.forEach { it.update() }

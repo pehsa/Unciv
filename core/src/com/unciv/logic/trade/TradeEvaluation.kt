@@ -3,8 +3,11 @@ package com.unciv.logic.trade
 import com.unciv.Constants
 import com.unciv.logic.automation.Automation
 import com.unciv.logic.automation.ThreatLevel
+import com.unciv.logic.city.CityInfo
 import com.unciv.logic.civilization.CivilizationInfo
 import com.unciv.logic.civilization.diplomacy.RelationshipLevel
+import com.unciv.models.ruleset.ModOptionsConstants
+import com.unciv.models.ruleset.Ruleset
 import com.unciv.models.ruleset.tile.ResourceType
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -20,53 +23,54 @@ class TradeEvaluation {
             return false
 
         for (offer in trade.ourOffers)
-            if (!isOfferValid(offer, offerer))
+            if (!isOfferValid(offer, offerer, tradePartner))
                 return false
         for (offer in trade.theirOffers)
-            if (!isOfferValid(offer, tradePartner))
+            if (!isOfferValid(offer, tradePartner, offerer))
                 return false
         return true
     }
 
-    private fun isOfferValid(tradeOffer: TradeOffer, offerer: CivilizationInfo): Boolean {
+    private fun isOfferValid(tradeOffer: TradeOffer, offerer: CivilizationInfo, tradePartner: CivilizationInfo): Boolean {
 
         fun hasResource(tradeOffer: TradeOffer): Boolean {
             val resourcesByName = offerer.getCivResourcesByName()
             return resourcesByName.containsKey(tradeOffer.name) && resourcesByName[tradeOffer.name]!! >= 0
         }
 
-        when (tradeOffer.type) {
-            TradeType.Gold -> return true // even if they go negative it's okay
-            TradeType.Gold_Per_Turn -> return true // even if they go negative it's okay
-            TradeType.Treaty -> return true
-            TradeType.Agreement -> return true
-            TradeType.Luxury_Resource -> return hasResource(tradeOffer)
-            TradeType.Strategic_Resource -> return hasResource(tradeOffer)
-            TradeType.Technology -> return true
-            TradeType.Introduction -> return true
-            TradeType.WarDeclaration -> return true
-            TradeType.City -> return offerer.cities.any { it.id == tradeOffer.name }
+        return when (tradeOffer.type) {
+            TradeType.Gold -> true // even if they go negative it's okay
+            TradeType.Gold_Per_Turn -> true // even if they go negative it's okay
+            TradeType.Treaty -> true
+            TradeType.Agreement -> true
+            TradeType.Luxury_Resource -> hasResource(tradeOffer)
+            TradeType.Strategic_Resource -> hasResource(tradeOffer)
+            TradeType.Technology -> true
+            TradeType.Introduction -> !tradePartner.knows(tradeOffer.name) // You can't introduce them to someone they already know!
+            TradeType.WarDeclaration -> true
+            TradeType.City -> offerer.cities.any { it.id == tradeOffer.name }
         }
     }
 
     fun isTradeAcceptable(trade: Trade, evaluator: CivilizationInfo, tradePartner: CivilizationInfo): Boolean {
-        var sumOfTheirOffers = trade.theirOffers.asSequence()
+        val sumOfTheirOffers = trade.theirOffers.asSequence()
                 .filter { it.type != TradeType.Treaty } // since treaties should only be evaluated once for 2 sides
                 .map { evaluateBuyCost(it, evaluator, tradePartner) }.sum()
+
+        var sumOfOurOffers = trade.ourOffers.map { evaluateSellCost(it, evaluator, tradePartner) }.sum()
 
         // If we're making a peace treaty, don't try to up the bargain for people you don't like.
         // Leads to spartan behaviour where you demand more, the more you hate the enemy...unhelpful
         if (trade.ourOffers.none { it.name == Constants.peaceTreaty || it.name == Constants.researchAgreement }) {
             val relationshipLevel = evaluator.getDiplomacyManager(tradePartner).relationshipLevel()
-            if (relationshipLevel == RelationshipLevel.Enemy) sumOfTheirOffers = (sumOfTheirOffers * 1.5).toInt()
-            else if (relationshipLevel == RelationshipLevel.Unforgivable) sumOfTheirOffers *= 2
+            if (relationshipLevel == RelationshipLevel.Enemy) sumOfOurOffers = (sumOfOurOffers * 1.5).toInt()
+            else if (relationshipLevel == RelationshipLevel.Unforgivable) sumOfOurOffers *= 2
         }
 
-        val sumOfOurOffers = trade.ourOffers.map { evaluateSellCost(it, evaluator, tradePartner) }.sum()
         return sumOfOurOffers <= sumOfTheirOffers
     }
 
-    fun evaluateBuyCost(offer: TradeOffer, civInfo: CivilizationInfo, tradePartner: CivilizationInfo): Int {
+    private fun evaluateBuyCost(offer: TradeOffer, civInfo: CivilizationInfo, tradePartner: CivilizationInfo): Int {
         when (offer.type) {
             TradeType.Gold -> return offer.amount
             TradeType.Gold_Per_Turn -> return offer.amount * offer.duration
@@ -74,7 +78,7 @@ class TradeEvaluation {
                 return when (offer.name) {
                     // Since it will be evaluated twice, once when they evaluate our offer and once when they evaluate theirs
                     Constants.peaceTreaty -> evaluatePeaceCostForThem(civInfo, tradePartner)
-                    Constants.researchAgreement -> evaluateResearchAgreementCostForThem(civInfo, tradePartner)
+                    Constants.researchAgreement -> -offer.amount
                     else -> 1000
                 }
             }
@@ -129,7 +133,7 @@ class TradeEvaluation {
             TradeType.Technology ->
                 return (sqrt(civInfo.gameInfo.ruleSet.technologies[offer.name]!!.cost.toDouble())
                         * civInfo.gameInfo.gameParameters.gameSpeed.modifier).toInt() * 20
-            TradeType.Introduction -> return 250
+            TradeType.Introduction -> return introductionValue(civInfo.gameInfo.ruleSet)
             TradeType.WarDeclaration -> {
                 val civToDeclareWarOn = civInfo.gameInfo.getCivilization(offer.name)
                 val threatToThem = Automation.threatAssessment(civInfo, civToDeclareWarOn)
@@ -146,9 +150,10 @@ class TradeEvaluation {
             TradeType.City -> {
                 val city = tradePartner.cities.first { it.id == offer.name }
                 val stats = city.cityStats.currentCityStats
+                val surrounded: Int = surroundedByOurCities(city, civInfo)
                 if (civInfo.getHappiness() + city.cityStats.happinessList.values.sum() < 0)
                     return 0 // we can't really afford to go into negative happiness because of buying a city
-                val sumOfStats = stats.culture + stats.gold + stats.science + stats.production + stats.happiness + stats.food
+                val sumOfStats = stats.culture + stats.gold + stats.science + stats.production + stats.happiness + stats.food + surrounded
                 return sumOfStats.toInt() * 100
             }
             TradeType.Agreement -> {
@@ -157,8 +162,18 @@ class TradeEvaluation {
             }
         }
     }
+    private fun surroundedByOurCities(city: CityInfo, civInfo: CivilizationInfo): Int{
+        val borderingCivs: List<String> = city.getNeighbouringCivs()
+        if (borderingCivs.size == 1 && borderingCivs.contains(civInfo.civName)){
+            return 10*civInfo.getEraNumber() // if the city is surrounded only by trading civ
+        }
+        if (borderingCivs.contains(civInfo.civName))
+            return 2*civInfo.getEraNumber() // if the city has a border with trading civ
+        return 0
 
-    fun evaluateSellCost(offer: TradeOffer, civInfo: CivilizationInfo, tradePartner: CivilizationInfo): Int {
+    }
+
+    private fun evaluateSellCost(offer: TradeOffer, civInfo: CivilizationInfo, tradePartner: CivilizationInfo): Int {
         when (offer.type) {
             TradeType.Gold -> return offer.amount
             TradeType.Gold_Per_Turn -> return offer.amount * offer.duration
@@ -166,7 +181,7 @@ class TradeEvaluation {
                 return when (offer.name) {
                     // Since it will be evaluated twice, once when they evaluate our offer and once when they evaluate theirs
                     Constants.peaceTreaty -> evaluatePeaceCostForThem(civInfo, tradePartner)
-                    Constants.researchAgreement -> evaluateResearchAgreementCostForThem(civInfo, tradePartner)
+                    Constants.researchAgreement -> -offer.amount
                     else -> 1000
                 }
             }
@@ -200,7 +215,7 @@ class TradeEvaluation {
                 return totalCost
             }
             TradeType.Technology -> return sqrt(civInfo.gameInfo.ruleSet.technologies[offer.name]!!.cost.toDouble()).toInt() * 20
-            TradeType.Introduction -> return 250
+            TradeType.Introduction -> return introductionValue(civInfo.gameInfo.ruleSet)
             TradeType.WarDeclaration -> {
                 val civToDeclareWarOn = civInfo.gameInfo.getCivilization(offer.name)
                 val threatToUs = Automation.threatAssessment(civInfo, civToDeclareWarOn)
@@ -216,8 +231,10 @@ class TradeEvaluation {
 
             TradeType.City -> {
                 val city = civInfo.cities.first { it.id == offer.name }
+                val capitalcity = civInfo.getCapital()
+                val distanceCost = distanceCityTradeModifier(civInfo, capitalcity, city)
                 val stats = city.cityStats.currentCityStats
-                val sumOfStats = stats.culture + stats.gold + stats.science + stats.production + stats.happiness + stats.food
+                val sumOfStats = stats.culture + stats.gold + stats.science + stats.production + stats.happiness + stats.food - distanceCost
                 return sumOfStats.toInt() * 100
             }
             TradeType.Agreement -> {
@@ -234,11 +251,18 @@ class TradeEvaluation {
             }
         }
     }
+    fun distanceCityTradeModifier(civInfo: CivilizationInfo, capitalcity: CityInfo, city: CityInfo): Int{
+        val distanceBetweenCities = capitalcity.getCenterTile().aerialDistanceTo(city.getCenterTile())
+
+        if (distanceBetweenCities < 500)  return 0
+        return min(50,  (500 - distanceBetweenCities) * civInfo.getEraNumber())
+    }
 
     fun evaluatePeaceCostForThem(ourCivilization: CivilizationInfo, otherCivilization: CivilizationInfo): Int {
-        val ourCombatStrength = Automation.evaluteCombatStrength(ourCivilization)
-        val theirCombatStrength = Automation.evaluteCombatStrength(otherCivilization)
-        if (ourCombatStrength == theirCombatStrength) return 0
+        val ourCombatStrength = Automation.evaluateCombatStrength(ourCivilization)
+        val theirCombatStrength = Automation.evaluateCombatStrength(otherCivilization)
+        if (ourCombatStrength*1.5f >= theirCombatStrength && theirCombatStrength * 1.5f >= ourCombatStrength)
+            return 0 // we're roughly equal, there's no huge power imbalance
         if (ourCombatStrength == 0) return -1000
         if (theirCombatStrength == 0) return 1000 // Chumps got no cities or units
         if (ourCombatStrength > theirCombatStrength) {
@@ -252,7 +276,9 @@ class TradeEvaluation {
         }
     }
 
-    fun evaluateResearchAgreementCostForThem(ourCivilization: CivilizationInfo, otherCivilization: CivilizationInfo): Int {
-        return -100 * (ourCivilization.getEraNumber() - otherCivilization.getEraNumber())
+    private fun introductionValue(ruleSet: Ruleset): Int {
+        val unique = ruleSet.modOptions.uniqueObjects.firstOrNull{ it.placeholderText == ModOptionsConstants.tradeCivIntroductions }
+        if (unique == null) return 0
+        return unique.params[0].toInt()
     }
 }

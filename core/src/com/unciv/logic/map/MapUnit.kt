@@ -6,13 +6,16 @@ import com.unciv.UncivGame
 import com.unciv.logic.automation.UnitAutomation
 import com.unciv.logic.automation.WorkerAutomation
 import com.unciv.logic.civilization.CivilizationInfo
+import com.unciv.logic.civilization.LocationAction
 import com.unciv.logic.civilization.NotificationIcon
+import com.unciv.models.UnitActionType
 import com.unciv.models.ruleset.Ruleset
 import com.unciv.models.ruleset.Unique
+import com.unciv.models.ruleset.tile.TileImprovement
 import com.unciv.models.ruleset.unit.BaseUnit
 import com.unciv.models.ruleset.unit.UnitType
+import com.unciv.ui.utils.toPercent
 import java.text.DecimalFormat
-import kotlin.random.Random
 
 /**
  * The immutable properties and mutable game state of an individual unit present on the map
@@ -44,6 +47,9 @@ class MapUnit {
     var ignoresTerrainCost = false
 
     @Transient
+    var ignoresZoneOfControl = false
+
+    @Transient
     var allTilesCosts1 = false
 
     @Transient
@@ -70,6 +76,15 @@ class MapUnit {
     @Transient
     var cannotEnterOceanTilesUntilAstronomy = false
 
+    @Transient
+    var canEnterForeignTerrain: Boolean = false
+
+    @Transient
+    var paradropRange = 0
+
+    @Transient
+    var hasUniqueToBuildImprovements = false    // not canBuildImprovements to avoid confusion
+
     lateinit var owner: String
 
     /**
@@ -84,27 +99,32 @@ class MapUnit {
 
     /**
      * Name which should be displayed in UI
+     * 
+     * Note this is translated after being returned from this function, so let's pay
+     * attention to combined names (renamed units, religion).
      */
     fun displayName(): String {
-        return if (instanceName == null) name
-        else "$instanceName ({$name})"
+        val name = if (instanceName == null) name
+                   else "$instanceName ({${name}})"
+        return if (religion != null) "[$name] ([$religion])"
+               else name
     }
 
     var currentMovement: Float = 0f
     var health: Int = 100
 
     var action: String? = null // work, automation, fortifying, I dunno what.
+    @Transient
+    var showAdditionalActions: Boolean = false
 
     var attacksThisTurn = 0
     var promotions = UnitPromotions()
     var due: Boolean = true
     var isTransported: Boolean = false
-
-    companion object {
-        private const val ANCIENT_RUIN_MAP_REVEAL_OFFSET = 4
-        private const val ANCIENT_RUIN_MAP_REVEAL_RANGE = 4
-        private const val ANCIENT_RUIN_MAP_REVEAL_CHANCE = 0.8f
-    }
+    
+    var abilityUsedCount: HashMap<String, Int> = hashMapOf()
+    var religion: String? = null
+    var religiousStrengthLost = 0
 
     //region pure functions
     fun clone(): MapUnit {
@@ -120,60 +140,71 @@ class MapUnit {
         toReturn.attacksThisTurn = attacksThisTurn
         toReturn.promotions = promotions.clone()
         toReturn.isTransported = isTransported
+        toReturn.abilityUsedCount.putAll(abilityUsedCount)
+        toReturn.religion = religion
+        toReturn.religiousStrengthLost = religiousStrengthLost
         return toReturn
     }
 
     val type: UnitType
-        get() = baseUnit.unitType
+        get() = baseUnit.getType()
 
     fun baseUnit(): BaseUnit = baseUnit
-    fun getMovementString(): String = DecimalFormat("0.#").format(currentMovement.toDouble()) + "/" + getMaxMovement()
+    fun getMovementString(): String =
+        DecimalFormat("0.#").format(currentMovement.toDouble()) + "/" + getMaxMovement()
+
     fun getTile(): TileInfo = currentTile
     fun getMaxMovement(): Int {
         if (isEmbarked()) return getEmbarkedMovement()
 
         var movement = baseUnit.movement
-        movement += getUniques().count { it.text == "+1 Movement" }
-
-        if (type.isWaterUnit() && !type.isCivilian()
-                && civInfo.hasUnique("All military naval units receive +1 movement and +1 sight"))
-            movement += 1
+        movement += getMatchingUniques("[] Movement").sumBy { it.params[0].toInt() }
 
         for (unique in civInfo.getMatchingUniques("+[] Movement for all [] units"))
             if (matchesFilter(unique.params[1]))
                 movement += unique.params[0].toInt()
 
         if (civInfo.goldenAges.isGoldenAge() &&
-                civInfo.hasUnique("+1 Movement for all units during Golden Age"))
+            civInfo.hasUnique("+1 Movement for all units during Golden Age")
+        )
             movement += 1
 
         return movement
     }
 
-    // This SHOULD NOT be a hashset, because if it is, then promotions with the same text (e.g. barrage I, barrage II)
+
+    // This SHOULD NOT be a HashSet, because if it is, then promotions with the same text (e.g. barrage I, barrage II)
     //  will not get counted twice!
     @Transient
-    var tempUniques = ArrayList<Unique>()
+    private var tempUniques = ArrayList<Unique>()
 
     fun getUniques(): ArrayList<Unique> = tempUniques
 
-    fun getMatchingUniques(placeholderText: String): Sequence<Unique> = tempUniques.asSequence().filter { it.placeholderText == placeholderText }
+    fun getMatchingUniques(placeholderText: String): Sequence<Unique> =
+        tempUniques.asSequence().filter { it.placeholderText == placeholderText }
+
+    fun hasUnique(unique: String): Boolean {
+        return getUniques().any { it.placeholderText == unique }
+    }
 
     fun updateUniques() {
         val uniques = ArrayList<Unique>()
         val baseUnit = baseUnit()
         uniques.addAll(baseUnit.uniqueObjects)
-
+        uniques.addAll(type.uniqueObjects)
+        
         for (promotion in promotions.promotions) {
             uniques.addAll(currentTile.tileMap.gameInfo.ruleSet.unitPromotions[promotion]!!.uniqueObjects)
         }
 
         tempUniques = uniques
 
-        // "All tiles costs 1" obsoleted in 3.11.18
-        allTilesCosts1 = hasUnique("All tiles cost 1 movement") || hasUnique("All tiles costs 1")
+        //todo: parameterize [terrainFilter] in 5 to 7 of the following:
+
+        allTilesCosts1 = hasUnique("All tiles cost 1 movement")
         canPassThroughImpassableTiles = hasUnique("Can pass through impassable tiles")
         ignoresTerrainCost = hasUnique("Ignores terrain cost")
+        ignoresZoneOfControl = hasUnique("Ignores Zone of Control")
         roughTerrainPenalty = hasUnique("Rough terrain penalty")
         doubleMovementInCoast = hasUnique("Double movement in coast")
         doubleMovementInForestAndJungle = hasUnique("Double movement rate through Forest and Jungle")
@@ -181,88 +212,138 @@ class MapUnit {
         canEnterIceTiles = hasUnique("Can enter ice tiles")
         cannotEnterOceanTiles = hasUnique("Cannot enter ocean tiles")
         cannotEnterOceanTilesUntilAstronomy = hasUnique("Cannot enter ocean tiles until Astronomy")
+        hasUniqueToBuildImprovements = hasUnique(Constants.canBuildImprovements)
+        canEnterForeignTerrain =
+            hasUnique("May enter foreign tiles without open borders, but loses [] religious strength each turn it ends there")
+                    || hasUnique("May enter foreign tiles without open borders")
     }
 
-    fun hasUnique(unique: String): Boolean {
-        return getUniques().any { it.placeholderText == unique }
+    fun copyStatisticsTo(newUnit: MapUnit) {
+        newUnit.health = health
+        newUnit.instanceName = instanceName
+        newUnit.currentMovement = currentMovement
+        newUnit.attacksThisTurn = attacksThisTurn
+        newUnit.isTransported = isTransported
+        for (promotion in newUnit.promotions.promotions)
+            if (promotion !in promotions.promotions)
+                promotions.addPromotion(promotion, isFree = true)
+        
+        newUnit.promotions = promotions.clone()
+        
+        newUnit.updateUniques()
+        newUnit.updateVisibleTiles()
+    }
+    
+    /**
+     * Determines this (land or sea) unit's current maximum vision range from unit properties, civ uniques and terrain.
+     * @return Maximum distance of tiles this unit may possibly see
+     */
+    private fun getVisibilityRange(): Int {
+        var visibilityRange = 2
+        for (unique in civInfo.getMatchingUniques("+[] Sight for all [] units"))
+            if (matchesFilter(unique.params[1]))
+                visibilityRange += unique.params[0].toInt()
+
+        // TODO: This should be replaced with "Sight" like others, for naming consistency
+        visibilityRange += getMatchingUniques("[] Visibility Range").sumBy { it.params[0].toInt() }
+        
+        if (hasUnique("Limited Visibility")) visibilityRange -= 1
+
+
+        for (unique in getTile().getAllTerrains().flatMap { it.uniqueObjects })
+            if (unique.placeholderText == "[] Sight for [] units" && matchesFilter(unique.params[1]))
+                visibilityRange += unique.params[0].toInt()
+
+        if (visibilityRange < 1) visibilityRange = 1
+
+        return visibilityRange
     }
 
+    /**
+     * Update this unit's cache of viewable tiles and its civ's as well.
+     */
     fun updateVisibleTiles() {
-        if (type.isAirUnit()) {
+        if (baseUnit.isAirUnit()) {
             viewableTiles = if (hasUnique("6 tiles in every direction always visible"))
                 getTile().getTilesInDistance(6).toList()  // it's that simple
             else listOf() // bomber units don't do recon
-        } else {
-            var visibilityRange = 2
-            visibilityRange += getUniques().count { it.text == "+1 Visibility Range" }
-            for (unique in civInfo.getMatchingUniques("+[] Sight for all [] units"))
-                if (matchesFilter(unique.params[1]))
-                    visibilityRange += unique.params[0].toInt()
-            if (hasUnique("+2 Visibility Range")) visibilityRange += 2 // This shouldn't be stackable
-            if (hasUnique("Limited Visibility")) visibilityRange -= 1
-            if (civInfo.hasUnique("+1 Sight for all land military units") && type.isMilitary() && type.isLandUnit())
-                visibilityRange += 1
-            if (type.isWaterUnit() && !type.isCivilian()
-                    && civInfo.hasUnique("All military naval units receive +1 movement and +1 sight"))
-                visibilityRange += 1
-            if (isEmbarked() && civInfo.hasUnique("+1 Sight when embarked"))
-                visibilityRange += 1
-            val tile = getTile()
-            if (tile.isHill() && type.isLandUnit()) visibilityRange += 1
-
-            viewableTiles = tile.getViewableTilesList(visibilityRange)
+            civInfo.updateViewableTiles() // for the civ
+            return
         }
+        viewableTiles = getTile().getViewableTilesList(getVisibilityRange())
         civInfo.updateViewableTiles() // for the civ
     }
 
-    fun isFortified() = action?.startsWith("Fortify") == true
+    fun isActionUntilHealed() = action?.endsWith("until healed") == true
 
-    fun isSleeping() = action?.startsWith("Sleep") == true
+    fun isFortified() = action?.startsWith(UnitActionType.Fortify.value) == true
+    fun isFortifyingUntilHealed() = isFortified() && isActionUntilHealed()
+
+    fun isSleeping() = action?.startsWith(UnitActionType.Sleep.value) == true
+    fun isSleepingUntilHealed() = isSleeping() && isActionUntilHealed()
 
     fun isMoving() = action?.startsWith("moveTo") == true
+    
+    fun isAutomated() = action == UnitActionType.Automate.value
+    fun isExploring() = action == UnitActionType.Explore.value
+    fun isPreparingParadrop() = action == UnitActionType.Paradrop.value
+    fun isSetUpForSiege() = action == UnitActionType.SetUp.value
+
+    /** For display in Unit Overview */
+    fun getActionLabel() = if (action == null) "" else if (isFortified()) UnitActionType.Fortify.value else action!!
+
+    fun isCivilian() = baseUnit.isCivilian()
 
     fun getFortificationTurns(): Int {
         if (!isFortified()) return 0
         return action!!.split(" ")[1].toInt()
     }
 
+    // debug helper (please update comment if you see some "$unit" using this)
     override fun toString() = "$name - $owner"
 
 
     fun isIdle(): Boolean {
         if (currentMovement == 0f) return false
-        if (hasUnique(Constants.workerUnique) && getTile().improvementInProgress != null) return false
-        if (hasUnique("Can construct roads") && currentTile.improvementInProgress == "Road") return false
-        if (isFortified()) return false
-        if (action == Constants.unitActionExplore || isSleeping()
-                || action == Constants.unitActionAutomation || isMoving()) return false
-        return true
+        if (getTile().improvementInProgress != null 
+            && canBuildImprovement(getTile().getTileImprovementInProgress()!!)) 
+                return false
+        // unique "Can construct roads" deprecated since 3.15.5
+            if (hasUnique("Can construct roads") && currentTile.improvementInProgress == RoadStatus.Road.name) return false
+        //
+        return !(isFortified() || isExploring() || isSleeping() || isAutomated() || isMoving())
     }
 
+    fun maxAttacksPerTurn(): Int {
+        var maxAttacksPerTurn = 1 + getMatchingUniques("[] additional attacks per turn").sumBy { it.params[0].toInt() }
+        return maxAttacksPerTurn
+    }
+    
     fun canAttack(): Boolean {
         if (currentMovement == 0f) return false
-        if (attacksThisTurn > 0 && !hasUnique("1 additional attack per turn")) return false
-        if (attacksThisTurn > 1) return false
-        return true
+        return attacksThisTurn < maxAttacksPerTurn()
     }
 
     fun getRange(): Int {
-        if (type.isMelee()) return 1
+        if (baseUnit.isMelee()) return 1
         var range = baseUnit().range
-        if (hasUnique("+1 Range")) range++
-        if (hasUnique("+2 Range")) range += 2
+        range += getMatchingUniques("[] Range").sumBy { it.params[0].toInt() }
         return range
     }
 
 
     fun isEmbarked(): Boolean {
-        if (!type.isLandUnit()) return false
+        if (!baseUnit.isLandUnit()) return false
         return currentTile.isWater
     }
 
-    fun isInvisible(): Boolean {
+    fun isInvisible(to: CivilizationInfo): Boolean {
         if (hasUnique("Invisible to others"))
             return true
+        if (hasUnique("Invisible to non-adjacent units"))
+            return getTile().getTilesInDistance(1).none {
+                it.getOwner() == to || it.getUnits().any { unit -> unit.owner == to.civName }
+            }
         return false
     }
 
@@ -278,39 +359,47 @@ class MapUnit {
 
         // Go up the upgrade tree until you find the last one which is buildable
         while (unit.upgradesTo != null && unit.getDirectUpgradeUnit(civInfo).requiredTech
-                        .let { it == null || civInfo.tech.isResearched(it) })
+                .let { it == null || civInfo.tech.isResearched(it) }
+        )
             unit = unit.getDirectUpgradeUnit(civInfo)
         return unit
     }
 
-    fun canUpgrade(): Boolean {
+    /** @param ignoreRequired: Ignore possible tech/policy/building requirements. 
+     * Used for upgrading units via ancient ruins.
+     */
+    fun canUpgrade(unitToUpgradeTo: BaseUnit = getUnitToUpgradeTo(), ignoreRequired: Boolean = false): Boolean {
         // We need to remove the unit from the civ for this check,
         // because if the unit requires, say, horses, and so does its upgrade,
         // and the civ currently has 0 horses,
         // if we don't remove the unit before the check it's return false!
 
-        val unitToUpgradeTo = getUnitToUpgradeTo()
         if (name == unitToUpgradeTo.name) return false
         civInfo.removeUnit(this)
-        val canUpgrade = unitToUpgradeTo.isBuildable(civInfo)
+        val canUpgrade = 
+            if (ignoreRequired) unitToUpgradeTo.isBuildableIgnoringTechs(civInfo)
+            else unitToUpgradeTo.isBuildable(civInfo)
         civInfo.addUnit(this)
         return canUpgrade
     }
 
     fun getCostOfUpgrade(): Int {
         val unitToUpgradeTo = getUnitToUpgradeTo()
-        var goldCostOfUpgrade = (unitToUpgradeTo.cost - baseUnit().cost) * 2 + 10
-        for (unique in civInfo.getMatchingUniques("Gold cost of upgrading military units reduced by 33%"))
-            goldCostOfUpgrade = (goldCostOfUpgrade * 0.66f).toInt()
+        var goldCostOfUpgrade = (unitToUpgradeTo.cost - baseUnit().cost) * 2f + 10f
+        for (unique in civInfo.getMatchingUniques("Gold cost of upgrading [] units reduced by []%")) {
+            if (matchesFilter(unique.params[0]))
+                goldCostOfUpgrade *= (1 - unique.params[1].toFloat() / 100f)
+        }
+
         if (goldCostOfUpgrade < 0) return 0 // For instance, Landsknecht costs less than Spearman, so upgrading would cost negative gold
-        return goldCostOfUpgrade
+        return goldCostOfUpgrade.toInt()
     }
 
 
     fun canFortify(): Boolean {
-        if (type.isWaterUnit()) return false
-        if (type.isCivilian()) return false
-        if (type.isAirUnit()) return false
+        if (baseUnit.isWaterUnit()) return false
+        if (isCivilian()) return false
+        if (baseUnit.movesLikeAirUnits()) return false
         if (isEmbarked()) return false
         if (hasUnique("No defensive terrain bonus")) return false
         if (isFortified()) return false
@@ -330,13 +419,10 @@ class MapUnit {
     }
 
     private fun adjacentHealingBonus(): Int {
-        var healingBonus = 0
-        if (hasUnique("This unit and all others in adjacent tiles heal 5 additional HP per turn")) healingBonus += 5
-        if (hasUnique("This unit and all others in adjacent tiles heal 5 additional HP. This unit heals 5 additional HP outside of friendly territory.")) healingBonus += 5
-        return healingBonus
+        return getMatchingUniques("All adjacent units heal [] HP when healing").sumBy { it.params[0].toInt() }
     }
 
-    fun canGarrison() = type.isMilitary() && type.isLandUnit()
+    fun canGarrison() = baseUnit.isMilitary() && baseUnit.isLandUnit()
 
     fun isGreatPerson() = baseUnit.isGreatPerson()
 
@@ -344,9 +430,17 @@ class MapUnit {
 
     //region state-changing functions
     fun setTransients(ruleset: Ruleset) {
-        promotions.unit = this
+        promotions.setTransients(this)
         baseUnit = ruleset.units[name]
-                ?: throw java.lang.Exception("Unit $name is not found!")
+            ?: throw java.lang.Exception("Unit $name is not found!")
+        
+        // "Religion Spread" ability deprecated since 3.16.7, replaced with "Spread Religion"
+            if ("Religion Spread" in abilityUsedCount) {
+                abilityUsedCount[Constants.spreadReligionAbilityCount] = abilityUsedCount["Religion Spread"]!!
+                abilityUsedCount.remove("Religion Spread")
+            }
+        //
+        
         updateUniques()
     }
 
@@ -355,7 +449,7 @@ class MapUnit {
         if (currentMovement < 0) currentMovement = 0f
     }
 
-    fun getMovementDestination():TileInfo{
+    fun getMovementDestination(): TileInfo {
         val destination = action!!.replace("moveTo ", "").split(",").dropLastWhile { it.isEmpty() }
         val destinationVector = Vector2(destination[0].toFloat(), destination[1].toFloat())
         return currentTile.tileMap[destinationVector]
@@ -366,7 +460,7 @@ class MapUnit {
         if (currentMovement == 0f) return  // We've already done stuff this turn, and can't do any more stuff
 
         val enemyUnitsInWalkingDistance = movement.getDistanceToTiles().keys
-                .filter { it.militaryUnit != null && civInfo.isAtWarWith(it.militaryUnit!!.civInfo) }
+            .filter { it.militaryUnit != null && civInfo.isAtWarWith(it.militaryUnit!!.civInfo) }
         if (enemyUnitsInWalkingDistance.isNotEmpty()) {
             if (isMoving()) // stop on enemy in sight
                 action = null
@@ -389,9 +483,9 @@ class MapUnit {
             return
         }
 
-        if (action == Constants.unitActionAutomation) WorkerAutomation(this).automateWorkerAction()
+        if (isAutomated()) WorkerAutomation.automateWorkerAction(this)
 
-        if (action == Constants.unitActionExplore) UnitAutomation.automatedExplore(this)
+        if (isExploring()) UnitAutomation.automatedExplore(this)
     }
 
 
@@ -402,29 +496,35 @@ class MapUnit {
 
         if (civInfo.isCurrentPlayer())
             UncivGame.Current.settings.addCompletedTutorialTask("Construct an improvement")
+
         when {
-            tile.improvementInProgress!!.startsWith("Remove") -> {
+            tile.improvementInProgress!!.startsWith("Remove ") -> {
+                val removedFeatureName = tile.improvementInProgress!!.removePrefix("Remove ")
                 val tileImprovement = tile.getTileImprovement()
                 if (tileImprovement != null
-                        && tile.terrainFeatures.any { tileImprovement.terrainsCanBeBuiltOn.contains(it) }
-                        && !tileImprovement.terrainsCanBeBuiltOn.contains(tile.baseTerrain)) {
-                    tile.improvement = null // We removed a terrain (e.g. Forest) and the improvement (e.g. Lumber mill) requires it!
-                    if (tile.resource != null) civInfo.updateDetailedCivResources()        // unlikely, but maybe a mod makes a resource improvement dependent on a terrain feature
+                    && tile.terrainFeatures.any { 
+                        tileImprovement.terrainsCanBeBuiltOn.contains(it) && it == removedFeatureName 
+                    }
+                    && !tileImprovement.terrainsCanBeBuiltOn.contains(tile.baseTerrain)
+                ) {
+                    // We removed a terrain (e.g. Forest) and the improvement (e.g. Lumber mill) requires it!
+                    tile.improvement = null 
+                    if (tile.resource != null) civInfo.updateDetailedCivResources() // unlikely, but maybe a mod makes a resource improvement dependent on a terrain feature
                 }
-                if (tile.improvementInProgress == "Remove Road" || tile.improvementInProgress == "Remove Railroad")
+                if (RoadStatus.values().any { tile.improvementInProgress == it.removeAction })
                     tile.roadStatus = RoadStatus.None
                 else {
-                    val removedFeatureName = tile.improvementInProgress!!.removePrefix("Remove ")
                     val removedFeatureObject = tile.ruleset.terrains[removedFeatureName]
-                    if (removedFeatureObject!=null && removedFeatureObject.uniques
-                                    .contains("Provides a one-time Production bonus to the closest city when cut down")) {
+                    if (removedFeatureObject != null && removedFeatureObject.uniques
+                            .contains("Provides a one-time Production bonus to the closest city when cut down")
+                    ) {
                         tryProvideProductionToClosestCity(removedFeatureName)
                     }
                     tile.terrainFeatures.remove(removedFeatureName)
                 }
             }
-            tile.improvementInProgress == "Road" -> tile.roadStatus = RoadStatus.Road
-            tile.improvementInProgress == "Railroad" -> tile.roadStatus = RoadStatus.Railroad
+            tile.improvementInProgress == RoadStatus.Road.name -> tile.roadStatus = RoadStatus.Road
+            tile.improvementInProgress == RoadStatus.Railroad.name -> tile.roadStatus = RoadStatus.Railroad
             else -> {
                 tile.improvement = tile.improvementInProgress
                 if (tile.resource != null) civInfo.updateDetailedCivResources()
@@ -433,19 +533,24 @@ class MapUnit {
         tile.improvementInProgress = null
     }
 
+
     private fun tryProvideProductionToClosestCity(removedTerrainFeature: String) {
         val tile = getTile()
         val closestCity = civInfo.cities.minByOrNull { it.getCenterTile().aerialDistanceTo(tile) }
+        @Suppress("FoldInitializerAndIfToElvis")
         if (closestCity == null) return
         val distance = closestCity.getCenterTile().aerialDistanceTo(tile)
         var productionPointsToAdd = if (distance == 1) 20 else 20 - (distance - 2) * 5
-        if (tile.owningCity == null || tile.owningCity!!.civInfo != civInfo) productionPointsToAdd = productionPointsToAdd * 2 / 3
+        if (tile.owningCity == null || tile.owningCity!!.civInfo != civInfo) productionPointsToAdd =
+            productionPointsToAdd * 2 / 3
         if (productionPointsToAdd > 0) {
             closestCity.cityConstructions.addProductionPoints(productionPointsToAdd)
-            civInfo.addNotification("Clearing a [$removedTerrainFeature] has created [$productionPointsToAdd] Production for [${closestCity.name}]",
-                    closestCity.location, NotificationIcon.Construction)
+            val locations = LocationAction(listOf(tile.position, closestCity.location))
+            civInfo.addNotification(
+                "Clearing a [$removedTerrainFeature] has created [$productionPointsToAdd] Production for [${closestCity.name}]",
+                locations, NotificationIcon.Construction
+            )
         }
-
     }
 
     private fun heal() {
@@ -453,11 +558,12 @@ class MapUnit {
         if (civInfo.hasUnique("Can only heal by pillaging")) return
 
         var amountToHealBy = rankTileForHealing(getTile())
-        if (amountToHealBy == 0) return
+        if (amountToHealBy == 0 && !(hasUnique("May heal outside of friendly territory") && !getTile().isFriendlyTerritory(civInfo))) return
 
-        if (hasUnique("+10 HP when healing")) amountToHealBy += 10
+        amountToHealBy += getMatchingUniques("[] HP when healing").sumBy { it.params[0].toInt() }
+        
         val maxAdjacentHealingBonus = currentTile.getTilesInDistance(1)
-                .flatMap { it.getUnits().asSequence() }.map { it.adjacentHealingBonus() }.maxOrNull()
+            .flatMap { it.getUnits().asSequence() }.map { it.adjacentHealingBonus() }.maxOrNull()
         if (maxAdjacentHealingBonus != null)
             amountToHealBy += maxAdjacentHealingBonus
         if (hasUnique("All healing effects doubled"))
@@ -476,17 +582,32 @@ class MapUnit {
 
         var healing = when {
             tileInfo.isCityCenter() -> 20
-            tileInfo.isWater && isFriendlyTerritory && (type.isWaterUnit() || isTransported) -> 15 // Water unit on friendly water
+            tileInfo.isWater && isFriendlyTerritory && (baseUnit.isWaterUnit() || isTransported) -> 15 // Water unit on friendly water
             tileInfo.isWater -> 0 // All other water cases
             tileInfo.getOwner() == null -> 10 // Neutral territory
             isFriendlyTerritory -> 15 // Allied territory
             else -> 5 // Enemy territory
         }
+        
+        val mayHeal = healing > 0 || (tileInfo.isWater && hasUnique("May heal outside of friendly territory"))
+        if (!mayHeal) return healing
 
-        if (hasUnique("This unit and all others in adjacent tiles heal 5 additional HP. This unit heals 5 additional HP outside of friendly territory.")
-                && !isFriendlyTerritory
-                && healing > 0)// Additional healing from medic is only applied when the unit is able to heal
-            healing += 5
+        
+        for (unique in getMatchingUniques("[] HP when healing in [] tiles")) {
+            if (tileInfo.matchesFilter(unique.params[1], civInfo)) {
+                healing += unique.params[0].toInt()
+            }
+        }
+        
+        val healingCity = tileInfo.getTilesInDistance(1).firstOrNull {
+            it.isCityCenter() && it.getCity()!!.getMatchingUniques("[] Units adjacent to this city heal [] HP per turn when healing").any()
+        }?.getCity()
+        if (healingCity != null) {
+            for (unique in healingCity.getMatchingUniques("[] Units adjacent to this city heal [] HP per turn when healing")) {
+                if (!matchesFilter(unique.params[0])) continue
+                healing += unique.params[1].toInt()
+            }
+        }
 
         return healing
     }
@@ -494,25 +615,51 @@ class MapUnit {
     fun endTurn() {
         doAction()
 
-        if (currentMovement > 0 && hasUnique(Constants.workerUnique)
-                && getTile().improvementInProgress != null) workOnImprovement()
-        if (currentMovement > 0 && hasUnique("Can construct roads")
-                && currentTile.improvementInProgress == "Road") workOnImprovement()
+        if (currentMovement > 0 && 
+            // Constants.workerUnique deprecated since 3.15.5
+            getTile().improvementInProgress != null
+            && canBuildImprovement(getTile().getTileImprovementInProgress()!!)
+        ) workOnImprovement()
         if (currentMovement == getMaxMovement().toFloat() && isFortified()) {
             val currentTurnsFortified = getFortificationTurns()
             if (currentTurnsFortified < 2)
-                action = action!!.replace(currentTurnsFortified.toString(), (currentTurnsFortified + 1).toString(), true)
+                action = action!!.replace(
+                    currentTurnsFortified.toString(),
+                    (currentTurnsFortified + 1).toString(),
+                    true
+                )
         }
         if (hasUnique("Heal adjacent units for an additional 15 HP per turn"))
             currentTile.neighbors.flatMap { it.getUnits() }.forEach { it.healBy(15) }
 
         if (currentMovement == getMaxMovement().toFloat() // didn't move this turn
-                || hasUnique("Unit will heal every turn, even if it performs an action")) heal()
+            || hasUnique("Unit will heal every turn, even if it performs an action")
+        ) heal()
 
         if (action != null && health > 99)
-            if (action!!.endsWith(" until healed")) {
+            if (isActionUntilHealed()) {
                 action = null // wake up when healed
             }
+
+        if (isPreparingParadrop())
+            action = null
+
+        if (hasUnique("Religious Unit")
+            && getTile().getOwner() != null
+            && !getTile().getOwner()!!.isCityState()
+            && !civInfo.canPassThroughTiles(getTile().getOwner()!!)
+        ) {
+            val lostReligiousStrength =
+                getMatchingUniques("May enter foreign tiles without open borders, but loses [] religious strength each turn it ends there")
+                    .map { it.params[0].toInt() }
+                    .minOrNull()
+            if (lostReligiousStrength != null)
+                religiousStrengthLost += lostReligiousStrength
+            if (religiousStrengthLost >= baseUnit.religiousStrength) {
+                civInfo.addNotification("Your [${name}] lost its faith after spending too long inside enemy territory!", getTile().position, name)
+                destroy()
+            }
+        }
 
         getCitadelDamage()
         getTerrainDamage()
@@ -523,15 +670,31 @@ class MapUnit {
         attacksThisTurn = 0
         due = true
 
-        // Wake sleeping units if there's an enemy nearby and civilian is not protected
-        if (isSleeping() && (!type.isCivilian() || currentTile.militaryUnit == null) &&
-                currentTile.getTilesInDistance(2).any {
-                    it.militaryUnit != null && it.militaryUnit!!.civInfo.isAtWarWith(civInfo)
-                })
+        // Hakkapeliitta movement boost
+        if (getTile().getUnits().count() > 1)
+        {
+            // For every double-stacked tile, check if our cohabitant can boost our speed
+            for (unit in getTile().getUnits())
+            {
+                if (unit == this)
+                    continue
+
+                if (unit.getMatchingUniques("Transfer Movement to []").any { matchesFilter(it.params[0]) } )
+                    currentMovement = maxOf(getMaxMovement().toFloat(), unit.getMaxMovement().toFloat())
+            }
+        }
+
+        // Wake sleeping units if there's an enemy in vision range:
+        // Military units always but civilians only if not protected.
+        if (isSleeping() && (baseUnit.isMilitary() || currentTile.militaryUnit == null) &&
+            this.viewableTiles.any {
+                it.militaryUnit != null && it.militaryUnit!!.civInfo.isAtWarWith(civInfo)
+            }
+        )
             action = null
 
         val tileOwner = getTile().getOwner()
-        if (tileOwner != null && !civInfo.canEnterTiles(tileOwner) && !tileOwner.isCityState()) // if an enemy city expanded onto this tile while I was in it
+        if (tileOwner != null && !canEnterForeignTerrain && !civInfo.canPassThroughTiles(tileOwner) && !tileOwner.isCityState()) // if an enemy city expanded onto this tile while I was in it
             movement.teleportToClosestMoveableTile()
     }
 
@@ -540,24 +703,41 @@ class MapUnit {
         civInfo.removeUnit(this)
         civInfo.updateViewableTiles()
         // all transported units should be destroyed as well
-        currentTile.getUnits().filter { it.isTransported && isTransportTypeOf(it) }.toList() // because we're changing the list
-                .forEach { unit -> unit.destroy() }
+        currentTile.getUnits().filter { it.isTransported && isTransportTypeOf(it) }
+            .toList() // because we're changing the list
+            .forEach { unit -> unit.destroy() }
+    }
+
+    fun gift(recipient: CivilizationInfo) {
+        civInfo.removeUnit(this)
+        civInfo.updateViewableTiles()
+        // all transported units should be destroyed as well
+        currentTile.getUnits().filter { it.isTransported && isTransportTypeOf(it) }
+            .toList() // because we're changing the list
+            .forEach { unit -> unit.destroy() }
+        assignOwner(recipient)
+        recipient.updateViewableTiles()
     }
 
     fun removeFromTile() = currentTile.removeUnit(this)
 
     fun moveThroughTile(tile: TileInfo) {
-        if (tile.improvement == Constants.ancientRuins && civInfo.isMajorCiv())
+        // addPromotion requires currentTile to be valid because it accesses ruleset through it.
+        // getAncientRuinBonus, if it places a new unit, does too
+        currentTile = tile
+
+        if (civInfo.isMajorCiv() 
+            && tile.improvement != null
+            && tile.getTileImprovement()!!.isAncientRuinsEquivalent()
+        )
             getAncientRuinBonus(tile)
         if (tile.improvement == Constants.barbarianEncampment && !civInfo.isBarbarian())
             clearEncampment(tile)
 
-        // addPromotion requires currentTile to be valid because it accesses ruleset through it
-        currentTile = tile
-
-        if (!hasUnique("All healing effects doubled") && type.isLandUnit() && type.isMilitary()) {
+        if (!hasUnique("All healing effects doubled") && baseUnit.isLandUnit() && baseUnit.isMilitary()) {
+            //todo: Grants [promotion] to adjacent [unitFilter] units for the rest of the game
             val gainDoubleHealPromotion = tile.neighbors
-                    .any { it.containsUnique("Grants Rejuvenation (all healing effects doubled) to adjacent military land units for the rest of the game") }
+                .any { it.hasUnique("Grants Rejuvenation (all healing effects doubled) to adjacent military land units for the rest of the game") }
             if (gainDoubleHealPromotion && civInfo.gameInfo.ruleSet.unitPromotions.containsKey("Rejuvenation"))
                 promotions.addPromotion("Rejuvenation", true)
         }
@@ -567,14 +747,14 @@ class MapUnit {
 
     fun putInTile(tile: TileInfo) {
         when {
-            !movement.canMoveTo(tile) -> throw Exception("I can't go there!")
-            type.isAirUnit() -> tile.airUnits.add(this)
-            type.isCivilian() -> tile.civilianUnit = this
+            !movement.canMoveTo(tile) ->
+                throw Exception("I can't go there!")
+            baseUnit.movesLikeAirUnits() -> tile.airUnits.add(this)
+            isCivilian() -> tile.civilianUnit = this
             else -> tile.militaryUnit = this
         }
         // this check is here in order to not load the fresh built unit into carrier right after the build
-        isTransported = !tile.isCityCenter() &&
-                type.isAirUnit() // not moving civilians
+        isTransported = !tile.isCityCenter() && baseUnit.movesLikeAirUnits()  // not moving civilians
         moveThroughTile(tile)
     }
 
@@ -582,27 +762,34 @@ class MapUnit {
         tile.improvement = null
 
         // Notify city states that this unit cleared a Barbarian Encampment, required for quests
-        civInfo.gameInfo.getAliveCityStates().forEach { it.questManager.barbarianCampCleared(civInfo, tile.position) }
+        civInfo.gameInfo.getAliveCityStates()
+            .forEach { it.questManager.barbarianCampCleared(civInfo, tile.position) }
 
-        var goldGained = civInfo.getDifficulty().clearBarbarianCampReward * civInfo.gameInfo.gameParameters.gameSpeed.modifier
+        var goldGained =
+            civInfo.getDifficulty().clearBarbarianCampReward * civInfo.gameInfo.gameParameters.gameSpeed.modifier
         if (civInfo.hasUnique("Receive triple Gold from Barbarian encampments and pillaging Cities"))
             goldGained *= 3f
 
-        civInfo.gold += goldGained.toInt()
-        civInfo.addNotification("We have captured a barbarian encampment and recovered [${goldGained.toInt()}] gold!", tile.position, NotificationIcon.Gold)
+        civInfo.addGold(goldGained.toInt())
+        civInfo.addNotification(
+            "We have captured a barbarian encampment and recovered [${goldGained.toInt()}] gold!",
+            tile.position,
+            NotificationIcon.Gold
+        )
     }
 
     fun disband() {
         // evacuation of transported units before disbanding, if possible. toListed because we're modifying the unit list.
-        for (unit in currentTile.getUnits().filter { it.isTransported && isTransportTypeOf(it) }.toList()) {
-            // we disbanded a carrier in a city, it can still stay in the city
+        for (unit in currentTile.getUnits().filter { it.isTransported && isTransportTypeOf(it) }
+            .toList()) {
+            // if we disbanded a unit carrying other units in a city, the carried units can still stay in the city
             if (currentTile.isCityCenter() && unit.movement.canMoveTo(currentTile)) continue
             // if no "fuel" to escape, should be disbanded as well
             if (unit.currentMovement < 0.1)
                 unit.disband()
             // let's find closest city or another carrier where it can be evacuated
             val tileCanMoveTo = unit.currentTile.getTilesInDistance(unit.getRange() * 2)
-                    .filterNot { it == currentTile }.firstOrNull { unit.movement.canMoveTo(it) }
+                .filterNot { it == currentTile }.firstOrNull { unit.movement.canMoveTo(it) }
 
             if (tileCanMoveTo != null)
                 unit.movement.moveToTile(tileCanMoveTo)
@@ -612,75 +799,13 @@ class MapUnit {
 
         destroy()
         if (currentTile.getOwner() == civInfo)
-            civInfo.gold += baseUnit.getDisbandGold(civInfo)
+            civInfo.addGold(baseUnit.getDisbandGold(civInfo))
         if (civInfo.isDefeated()) civInfo.destroy()
     }
 
     private fun getAncientRuinBonus(tile: TileInfo) {
         tile.improvement = null
-        val tileBasedRandom = Random(tile.position.toString().hashCode())
-        val actions: ArrayList<() -> Unit> = ArrayList()
-        if (civInfo.cities.isNotEmpty()) actions.add {
-            val city = civInfo.cities.random(tileBasedRandom)
-            city.population.population++
-            city.population.autoAssignPopulation()
-            civInfo.addNotification("We have found survivors in the ruins - population added to [" + city.name + "]", tile.position, NotificationIcon.Growth)
-        }
-        val researchableAncientEraTechs = tile.tileMap.gameInfo.ruleSet.technologies.values
-                .filter {
-                    !civInfo.tech.isResearched(it.name)
-                            && civInfo.tech.canBeResearched(it.name)
-                            && it.era() == Constants.ancientEra
-                }
-        if (researchableAncientEraTechs.isNotEmpty())
-            actions.add {
-                val tech = researchableAncientEraTechs.random(tileBasedRandom).name
-                civInfo.tech.addTechnology(tech)
-                civInfo.addNotification("We have discovered the lost technology of [$tech] in the ruins!", tile.position, NotificationIcon.Science, tech)
-            }
-
-
-        val possibleUnits = listOf(Constants.settler, Constants.worker, "Warrior")
-                .filter { civInfo.gameInfo.ruleSet.units.containsKey(it) }
-        if (possibleUnits.isNotEmpty())
-            actions.add {
-                val chosenUnit = possibleUnits.random(tileBasedRandom)
-                if (!(civInfo.isCityState() || civInfo.isOneCityChallenger()) || chosenUnit != Constants.settler) { //City-States and OCC don't get settler from ruins
-                    civInfo.placeUnitNearTile(tile.position, chosenUnit)
-                    civInfo.addNotification("A [$chosenUnit] has joined us!", tile.position, chosenUnit)
-                }
-            }
-
-        if (!type.isCivilian())
-            actions.add {
-                promotions.XP += 10
-                civInfo.addNotification("An ancient tribe trains our [$name] in their ways of combat!", tile.position, name)
-            }
-
-        actions.add {
-            val amount = listOf(25, 60, 100).random(tileBasedRandom)
-            civInfo.gold += amount
-            civInfo.addNotification("We have found a stash of [$amount] gold in the ruins!", tile.position, NotificationIcon.Gold)
-        }
-
-        actions.add {
-            civInfo.policies.addCulture(20)
-            civInfo.addNotification("We have discovered cultural artifacts in the ruins! (+20 Culture)", tile.position, NotificationIcon.Culture)
-        }
-
-        // Map of the surrounding area
-        actions.add {
-            val revealCenter = tile.getTilesAtDistance(ANCIENT_RUIN_MAP_REVEAL_OFFSET).toList().random(tileBasedRandom)
-            val tilesToReveal = revealCenter
-                    .getTilesInDistance(ANCIENT_RUIN_MAP_REVEAL_RANGE)
-                    .filter { Random.nextFloat() < ANCIENT_RUIN_MAP_REVEAL_CHANCE }
-                    .map { it.position }
-            civInfo.exploredTiles.addAll(tilesToReveal)
-            civInfo.updateViewableTiles()
-            civInfo.addNotification("We have found a crudely-drawn map in the ruins!", tile.position, "ImprovementIcons/Ancient ruins")
-        }
-
-        (actions.random(tileBasedRandom))()
+        civInfo.ruinsManager.selectNextRuinsReward(this)
     }
 
     fun assignOwner(civInfo: CivilizationInfo, updateCivInfo: Boolean = true) {
@@ -690,10 +815,19 @@ class MapUnit {
     }
 
     fun canIntercept(attackedTile: TileInfo): Boolean {
-        if (attacksThisTurn > 1) return false
-        if (interceptChance() == 0) return false
-        if (attacksThisTurn > 0 && !hasUnique("1 extra Interception may be made per turn")) return false
+        if (!canIntercept()) return false
         if (currentTile.aerialDistanceTo(attackedTile) > baseUnit.interceptRange) return false
+        return true
+    }
+    
+    fun canIntercept(): Boolean {
+        if (interceptChance() == 0) return false
+        val maxAttacksPerTurn = 1 +
+            getMatchingUniques("[] extra interceptions may be made per turn").sumBy { it.params[0].toInt() } +
+            // Deprecated since 3.15.7
+                getMatchingUniques("1 extra interception may be made per turn").count()
+            //
+        if (attacksThisTurn >= maxAttacksPerTurn) return false
         return true
     }
 
@@ -702,33 +836,39 @@ class MapUnit {
     }
 
     fun isTransportTypeOf(mapUnit: MapUnit): Boolean {
-        val isAircraftCarrier = hasUnique("Can carry 2 aircraft")
-        val isMissileCarrier = hasUnique("Can carry 2 missiles")
-        if (!isMissileCarrier && !isAircraftCarrier)
-            return false
-        if (!mapUnit.type.isAirUnit()) return false
-        if (isMissileCarrier && mapUnit.type != UnitType.Missile)
-            return false
-        if (isAircraftCarrier && mapUnit.type == UnitType.Missile)
-            return false
-        return true
+        // Currently, only missiles and airplanes can be carried
+        if (!mapUnit.baseUnit.movesLikeAirUnits()) return false
+        return getMatchingUniques("Can carry [] [] units").any { mapUnit.matchesFilter(it.params[1]) }
+    }
+    
+    fun carryCapacity(unit: MapUnit): Int {
+        var capacity = getMatchingUniques("Can carry [] [] units").filter { unit.matchesFilter(it.params[1]) }.sumBy { it.params[0].toInt() }
+        capacity += getMatchingUniques("Can carry [] extra [] units").filter { unit.matchesFilter(it.params[1]) }.sumBy { it.params[0].toInt() }
+        // Deprecated since 3.15.5
+        capacity += getMatchingUniques("Can carry 2 aircraft").filter { unit.matchesFilter("Air") }.sumBy { 2 }
+        capacity += getMatchingUniques("Can carry 1 extra aircraft").filter { unit.matchesFilter("Air") }.sumBy { 1 }
+        return capacity
     }
 
-    fun canTransport(mapUnit: MapUnit): Boolean {
-        if (!isTransportTypeOf(mapUnit)) return false
-        if (owner != mapUnit.owner) return false
-
-        var unitCapacity = 2
-        unitCapacity += getUniques().count { it.text == "Can carry 1 extra air unit" }
-
-        if (currentTile.airUnits.count { it.isTransported } >= unitCapacity) return false
-
+    fun canTransport(unit: MapUnit): Boolean {
+        if (owner != unit.owner) return false
+        if (!isTransportTypeOf(unit)) return false
+        if (unit.getMatchingUniques("Cannot be carried by [] units").any{matchesFilter(it.params[0])}) return false
+        if (currentTile.airUnits.count { it.isTransported } >= carryCapacity(unit)) return false
         return true
     }
 
     fun interceptDamagePercentBonus(): Int {
-        return getUniques().filter { it.placeholderText == "Bonus when intercepting []%" }
-                .sumBy { it.params[0].toInt() }
+        // "Bonus when intercepting []%" deprecated since 3.15.7
+        return getUniques().filter { it.placeholderText == "Bonus when intercepting []%" || it.placeholderText == "[]% Damage when intercepting"}
+            .sumBy { it.params[0].toInt() }
+    }
+
+    fun receivedInterceptDamageFactor(): Float {
+        var damageFactor = 1f
+        for (unique in getMatchingUniques("Damage taken from interception reduced by []%"))
+            damageFactor *= 1f - unique.params[0].toFloat() / 100f
+        return damageFactor
     }
 
     private fun getTerrainDamage() {
@@ -738,39 +878,111 @@ class MapUnit {
             health -= tileDamage
 
             if (health <= 0) {
-                civInfo.addNotification("Our [$name] took [$tileDamage] tile damage and was destroyed", currentTile.position, name, NotificationIcon.Death)
+                civInfo.addNotification(
+                    "Our [$name] took [$tileDamage] tile damage and was destroyed",
+                    currentTile.position,
+                    name,
+                    NotificationIcon.Death
+                )
                 destroy()
-            } else civInfo.addNotification("Our [$name] took [$tileDamage] tile damage", currentTile.position, name)
+            } else civInfo.addNotification(
+                "Our [$name] took [$tileDamage] tile damage",
+                currentTile.position,
+                name
+            )
         }
 
     }
 
     private fun getCitadelDamage() {
-        // Check for Citadel damage
-        val applyCitadelDamage = currentTile.neighbors
-                .filter { it.getOwner() != null && civInfo.isAtWarWith(it.getOwner()!!) }
-                .map { it.getTileImprovement() }
-                .filter { it != null && it.hasUnique("Deal 30 damage to adjacent enemy units") }
-                .any()
+        // Check for Citadel damage - note: 'Damage does not stack with other Citadels'
+        val citadelTile = currentTile.neighbors
+            .firstOrNull {
+                it.getOwner() != null && civInfo.isAtWarWith(it.getOwner()!!) &&
+                        with(it.getTileImprovement()) {
+                            this != null && this.hasUnique("Deal 30 damage to adjacent enemy units")
+                        }
+            }
 
-        if (applyCitadelDamage) {
+        if (citadelTile != null) {
             health -= 30
-
+            val locations = LocationAction(listOf(citadelTile.position, currentTile.position))
             if (health <= 0) {
-                civInfo.addNotification("An enemy [Citadel] has destroyed our [$name]", currentTile.position, name, NotificationIcon.Death)
-                // todo - add notification for attacking civ
+                civInfo.addNotification(
+                    "An enemy [Citadel] has destroyed our [$name]",
+                    locations,
+                    NotificationIcon.Citadel, NotificationIcon.Death, name
+                )
+                citadelTile.getOwner()?.addNotification(
+                    "Your [Citadel] has destroyed an enemy [$name]",
+                    locations,
+                    NotificationIcon.Citadel, NotificationIcon.Death, name
+                )
                 destroy()
-            } else civInfo.addNotification("An enemy [Citadel] has attacked our [$name]", currentTile.position, name)
+            } else civInfo.addNotification(
+                "An enemy [Citadel] has attacked our [$name]",
+                locations,
+                NotificationIcon.Citadel, NotificationIcon.War, name 
+            )
         }
     }
 
     fun matchesFilter(filter: String): Boolean {
-        if (baseUnit.matchesFilter(filter)) return true
-        if ((filter == "Wounded" || filter == "wounded units") && health < 100) return true
-        if (hasUnique(filter)) return true
-        if ((filter == "Barbarians" || filter == "Barbarian") && civInfo.isBarbarian()) return true
-        if (filter == "Embarked" && isEmbarked()) return true
-        return false
+        if (filter.contains('{')) // multiple types at once - AND logic. Looks like:"{Military} {Land}"
+            return filter.removePrefix("{").removeSuffix("}").split("} {")
+                .all { matchesFilter(it) }
+        return when (filter) {
+            "Wounded", "wounded units" -> health < 100
+            "Barbarians", "Barbarian" -> civInfo.isBarbarian()
+            "City-State" -> civInfo.isCityState()
+            "Embarked" -> isEmbarked()
+            "Non-City" -> true
+            else -> {
+                if (baseUnit.matchesFilter(filter)) return true
+                if (hasUnique(filter)) return true
+                return false
+            }
+        }
+    }
+
+    fun canBuildImprovement(improvement: TileImprovement, tile: TileInfo = currentTile): Boolean {
+        val matchingUniques = getMatchingUniques(Constants.canBuildImprovements)
+        return matchingUniques.any { improvement.matchesFilter(it.params[0]) || tile.matchesTerrainFilter(it.params[0]) }
+    }
+    
+    fun religiousActionsUnitCanDo(): Sequence<String> {
+        return getMatchingUniques("Can [] [] times")
+            .map { it.params[0] }
+    }
+    
+    fun canDoReligiousAction(action: String): Boolean {
+        return getMatchingUniques("Can [] [] times").any { it.params[0] == action }
+    }
+    
+    fun getMaxReligiousActionUses(action: String): Int {
+        return getMatchingUniques("Can [] [] times")
+            .filter { it.params[0] == action }
+            .sumBy { it.params[1].toInt() }
+    }
+    
+    fun getPressureAddedFromSpread(): Int {
+        var pressureAdded = baseUnit.religiousStrength.toFloat()
+        for (unique in civInfo.getMatchingUniques("[]% Spread Religion Strength for [] units"))
+            if (matchesFilter(unique.params[0]))
+                pressureAdded *= unique.params[0].toPercent()
+        
+        return pressureAdded.toInt()
+    }
+    
+    fun getActionString(action: String): String {
+        val maxActionUses = getMaxReligiousActionUses(action)
+        if (abilityUsedCount[action] == null) return "0/0" // Something went wrong
+        return "${maxActionUses - abilityUsedCount[action]!!}/${maxActionUses}"
+    }
+
+    fun actionsOnDeselect() {
+        showAdditionalActions = false
+        if (isPreparingParadrop()) action = null
     }
 
     //endregion

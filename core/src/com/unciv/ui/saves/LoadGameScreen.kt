@@ -14,13 +14,13 @@ import com.unciv.logic.UncivShowableException
 import com.unciv.models.translations.tr
 import com.unciv.ui.pickerscreens.PickerScreen
 import com.unciv.ui.utils.*
-import java.text.SimpleDateFormat
+import com.unciv.ui.utils.UncivDateFormat.formatDate
 import java.util.*
 import java.util.concurrent.CancellationException
 import kotlin.concurrent.thread
 import com.unciv.ui.utils.AutoScrollPane as ScrollPane
 
-class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen() {
+class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen(disableScroll = true) {
     lateinit var selectedSave: String
     private val copySavedGameToClipboardButton = "Copy saved game to clipboard".toTextButton()
     private val saveTable = Table()
@@ -31,7 +31,7 @@ class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen() {
         setDefaultCloseAction(previousScreen)
 
         resetWindowState()
-        topTable.add(ScrollPane(saveTable)).height(stage.height * 2 / 3)
+        topTable.add(ScrollPane(saveTable))
 
         val rightSideTable = getRightSideTable()
 
@@ -73,6 +73,7 @@ class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen() {
 
     private fun getRightSideTable(): Table {
         val rightSideTable = Table()
+        rightSideTable.defaults().pad(10f)
 
         val errorLabel = "".toLabel(Color.RED)
         val loadFromClipboardButton = "Load copied data".toTextButton()
@@ -105,7 +106,7 @@ class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen() {
                     }
                 }
             }
-            rightSideTable.add(loadFromCustomLocation).pad(10f).row()
+            rightSideTable.add(loadFromCustomLocation).row()
         }
         rightSideTable.add(errorLabel).row()
 
@@ -170,29 +171,30 @@ class LoadGameScreen(previousScreen:CameraStageBaseScreen) : PickerScreen() {
     private fun onSaveSelected(save: FileHandle) {
         selectedSave = save.name()
         copySavedGameToClipboardButton.enable()
-        var textToSet = save.name()
+
+        rightSideButton.setText("Load [${save.name()}]".tr())
+        rightSideButton.enable()
+        deleteSaveButton.enable()
+        deleteSaveButton.color = Color.RED
+        descriptionLabel.setText("Loading...".tr())
+
 
         val savedAt = Date(save.lastModified())
-        descriptionLabel.setText("Loading...".tr())
-        textToSet += "\n{Saved at}: ".tr() + SimpleDateFormat("yyyy-MM-dd HH:mm").format(savedAt)
+        var textToSet = save.name() + "\n${"Saved at".tr()}: " + savedAt.formatDate()
         thread { // Even loading the game to get its metadata can take a long time on older phones
             try {
-                val game = GameSaver.loadGameFromFile(save)
+                val game = GameSaver.loadGamePreviewFromFile(save)
                 val playerCivNames = game.civilizations.filter { it.isPlayerCivilization() }.joinToString { it.civName.tr() }
                 textToSet += "\n" + playerCivNames +
                         ", " + game.difficulty.tr() + ", ${Fonts.turn}" + game.turns
                 if (game.gameParameters.mods.isNotEmpty())
-                    textToSet += "\n {Mods:} ".tr() + game.gameParameters.mods.joinToString()
+                    textToSet += "\n${"Mods:".tr()} " + game.gameParameters.mods.joinToString()
             } catch (ex: Exception) {
-                textToSet += "\n{Could not load game}!".tr()
+                textToSet += "\n${"Could not load game".tr()}!"
             }
 
             Gdx.app.postRunnable {
                 descriptionLabel.setText(textToSet)
-                rightSideButton.setText("Load [${save.name()}]".tr())
-                rightSideButton.enable()
-                deleteSaveButton.enable()
-                deleteSaveButton.color = Color.RED
             }
         }
     }

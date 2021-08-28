@@ -4,7 +4,7 @@ import com.badlogic.gdx.Application
 import com.badlogic.gdx.Gdx
 import com.unciv.logic.GameSaver
 
-data class WindowState (val width:Int=0, val height:Int=0)
+data class WindowState (val width: Int = 900, val height: Int = 600)
 
 class GameSettings {
     var showWorkedTiles: Boolean = false
@@ -27,6 +27,7 @@ class GameSettings {
     var automatedWorkersReplaceImprovements = true
 
     var showMinimap: Boolean = true
+    var minimapSize: Int = 6    // default corresponds to 15% screen space
     var showPixelUnits: Boolean = false
     var showPixelImprovements: Boolean = true
     var continuousRendering = false
@@ -39,8 +40,12 @@ class GameSettings {
     var isFreshlyCreated = false
     var visualMods = HashSet<String>()
 
-    var showExperimentalWorldWrap = false
-    var showExperimentalTileLayering = false
+    var showExperimentalWorldWrap = false // We're keeping this as a config due to ANR problems on Android phones for people who don't know what they're doing :/
+    var showExperimentalReligion = false
+
+    var lastOverviewPage: String = "Cities"
+
+    var allowAndroidPortrait = false    // Opt-in to allow Unciv to follow a screen rotation to portrait
 
     init {
         // 26 = Android Oreo. Versions below may display permanent icon in notification bar.
@@ -57,7 +62,7 @@ class GameSettings {
     }
 
     fun addCompletedTutorialTask(tutorialTask: String) {
-        tutorialTasksCompleted.add(tutorialTask)
-        save()
+        if (tutorialTasksCompleted.add(tutorialTask))
+            save()
     }
 }

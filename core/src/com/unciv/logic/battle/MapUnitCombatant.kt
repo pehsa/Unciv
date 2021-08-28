@@ -3,6 +3,7 @@ package com.unciv.logic.battle
 import com.unciv.logic.civilization.CivilizationInfo
 import com.unciv.logic.map.MapUnit
 import com.unciv.logic.map.TileInfo
+import com.unciv.models.UncivSound
 import com.unciv.models.ruleset.unit.UnitType
 
 class MapUnitCombatant(val unit: MapUnit) : ICombatant {
@@ -12,9 +13,12 @@ class MapUnitCombatant(val unit: MapUnit) : ICombatant {
     override fun getTile(): TileInfo = unit.getTile()
     override fun getName(): String = unit.name
     override fun isDefeated(): Boolean = unit.health <= 0
-    override fun isInvisible(): Boolean = unit.isInvisible()
+    override fun isInvisible(to: CivilizationInfo): Boolean = unit.isInvisible(to)
     override fun canAttack(): Boolean = unit.canAttack()
     override fun matchesCategory(category:String) = unit.matchesFilter(category)
+    override fun getAttackSound() = unit.baseUnit.attackSound.let { 
+        if (it==null) UncivSound.Click else UncivSound.custom(it)
+    }
 
     override fun takeDamage(damage: Int) {
         unit.health -= damage
@@ -27,7 +31,7 @@ class MapUnitCombatant(val unit: MapUnit) : ICombatant {
     }
 
     override fun getDefendingStrength(): Int {
-        return if (unit.isEmbarked() && !unit.type.isCivilian()) 5 * getCivInfo().getEraNumber()
+        return if (unit.isEmbarked() && !isCivilian()) 5 * getCivInfo().getEraNumber()
         else unit.baseUnit().strength
     }
 

@@ -5,7 +5,6 @@ import com.badlogic.gdx.Game
 import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.Input
 import com.badlogic.gdx.audio.Music
-import com.badlogic.gdx.graphics.g2d.TextureAtlas
 import com.badlogic.gdx.scenes.scene2d.actions.Actions
 import com.badlogic.gdx.utils.Align
 import com.unciv.logic.GameInfo
@@ -32,6 +31,7 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
     val fontImplementation = parameters.fontImplementation
     val consoleMode = parameters.consoleMode
     val customSaveLocationHelper = parameters.customSaveLocationHelper
+    val limitOrientationsHelper = parameters.limitOrientationsHelper
 
     lateinit var gameInfo: GameInfo
     fun isGameInfoInitialized() = this::gameInfo.isInitialized
@@ -59,7 +59,6 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
 
     var music: Music? = null
     val musicLocation = "music/thatched-villagers.mp3"
-    private var isSizeRestored = false
     var isInitialized = false
 
 
@@ -88,6 +87,10 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
         ImageGetter.resetAtlases()
         settings = GameSaver.getGeneralSettings() // needed for the screen
         ImageGetter.setNewRuleset(ImageGetter.ruleset)  // This needs to come after the settings, since we may have default visual mods
+        if(settings.tileSet !in ImageGetter.getAvailableTilesets()) { // If one of the tilesets is no longer available, default back
+            settings.tileSet = "FantasyHex"
+        }
+
         CameraStageBaseScreen.setSkin() // needs to come AFTER the Texture reset, since the buttons depend on it
 
         Gdx.graphics.isContinuousRendering = settings.continuousRendering
@@ -111,7 +114,6 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
 
 
                 thread(name="Music") { startMusic() }
-                restoreSize()
 
                 if (settings.isFreshlyCreated) {
                     setScreen(LanguagePickerScreen())
@@ -121,14 +123,6 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
         }
         crashController = CrashController.Impl(crashReportSender)
     }
-
-    fun restoreSize() {
-        if (!isSizeRestored && Gdx.app.type == Application.ApplicationType.Desktop && settings.windowState.height>39 && settings.windowState.width>39) {
-            isSizeRestored = true
-            Gdx.graphics.setWindowedMode(settings.windowState.width, settings.windowState.height)
-        }
-    }
-
 
     fun loadGame(gameInfo: GameInfo) {
         this.gameInfo = gameInfo
@@ -183,8 +177,9 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
 
     override fun dispose() {
         cancelDiscordEvent?.invoke()
+        Sounds.clearCache()
 
-        // Log still running threads (should be only this one and "DestroyJavaVM")
+        // Log still running threads (on desktop that should be only this one and "DestroyJavaVM")
         val numThreads = Thread.activeCount()
         val threadList = Array(numThreads) { _ -> Thread() }
         Thread.enumerate(threadList)
@@ -197,8 +192,8 @@ class UncivGame(parameters: UncivGameParameters) : Game() {
                 autoSaveThread.join()
             } else
                 GameSaver.autoSaveSingleThreaded(gameInfo)      // NO new thread
-            settings.save()
         }
+        settings.save()
 
         threadList.filter { it !== Thread.currentThread() && it.name != "DestroyJavaVM"}.forEach {
             println ("    Thread ${it.name} still running in UncivGame.dispose().")

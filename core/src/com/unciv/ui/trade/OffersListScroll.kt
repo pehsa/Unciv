@@ -9,40 +9,46 @@ import com.unciv.logic.trade.TradeOffersList
 import com.unciv.logic.trade.TradeType
 import com.unciv.logic.trade.TradeType.*
 import com.unciv.models.translations.tr
-import com.unciv.ui.utils.CameraStageBaseScreen
-import com.unciv.ui.utils.disable
-import com.unciv.ui.utils.onClick
-import com.unciv.ui.utils.toTextButton
+import com.unciv.ui.utils.*
 import kotlin.math.min
 import com.unciv.ui.utils.AutoScrollPane as ScrollPane
 
-class OffersListScroll(val onOfferClicked: (TradeOffer) -> Unit) : ScrollPane(null) {
+/**
+ * Widget for one fourth of an [OfferColumnsTable] - instantiated for ours/theirs × available/traded
+ * @param persistenceID  Part of ID added to [ExpanderTab.persistenceID] to distinguish the four usecases
+ * @param onOfferClicked What to do when a tradeButton is clicked
+ */
+class OffersListScroll(
+    private val persistenceID: String,
+    private val onOfferClicked: (TradeOffer) -> Unit
+) : ScrollPane(null) {
     val table = Table(CameraStageBaseScreen.skin).apply { defaults().pad(5f) }
 
 
     private val expanderTabs = HashMap<TradeType, ExpanderTab>()
 
     /**
-     *   offersToDisplay - the offers which should be displayed as buttons
-     *   otherOffers - the list of other side's offers to compare with whether these offers are unique
+     * @param offersToDisplay The offers which should be displayed as buttons
+     * @param otherOffers The list of other side's offers to compare with whether these offers are unique
      */
     fun update(offersToDisplay:TradeOffersList, otherOffers: TradeOffersList) {
         table.clear()
         expanderTabs.clear()
 
-        for (offertype in values()) {
-            val labelName = when(offertype){
-                Gold, Gold_Per_Turn, Treaty,Agreement,Introduction -> ""
+        for (offerType in values()) {
+            val labelName = when(offerType){
+                Gold, Gold_Per_Turn, Treaty, Agreement, Introduction -> ""
                 Luxury_Resource -> "Luxury resources"
                 Strategic_Resource -> "Strategic resources"
                 Technology -> "Technologies"
                 WarDeclaration -> "Declarations of war"
                 City -> "Cities"
             }
-            val offersOfType = offersToDisplay.filter { it.type == offertype }
-            if (labelName!="" && offersOfType.any()) {
-                expanderTabs[offertype] = ExpanderTab(labelName.tr(), CameraStageBaseScreen.skin)
-                expanderTabs[offertype]!!.innerTable.defaults().pad(5f)
+            val offersOfType = offersToDisplay.filter { it.type == offerType }
+            if (labelName.isNotEmpty() && offersOfType.any()) {
+                expanderTabs[offerType] = ExpanderTab(labelName, persistenceID = "Trade.$persistenceID.$offerType") {
+                    it.defaults().pad(5f)
+                }
             }
         }
 

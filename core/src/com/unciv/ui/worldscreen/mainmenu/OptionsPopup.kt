@@ -2,20 +2,25 @@ package com.unciv.ui.worldscreen.mainmenu
 
 import com.badlogic.gdx.Application
 import com.badlogic.gdx.Gdx
+import com.badlogic.gdx.Input
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.scenes.scene2d.ui.*
-import com.badlogic.gdx.utils.Array
+import com.unciv.Constants
 import com.unciv.MainMenuScreen
 import com.unciv.logic.civilization.PlayerType
 import com.unciv.models.UncivSound
 import com.unciv.models.ruleset.RulesetCache
+import com.unciv.models.tilesets.TileSetCache
 import com.unciv.models.translations.TranslationFileWriter
 import com.unciv.models.translations.Translations
 import com.unciv.models.translations.tr
 import com.unciv.ui.utils.*
+import com.unciv.ui.utils.UncivTooltip.Companion.addTooltip
 import com.unciv.ui.worldscreen.WorldScreen
 import java.util.*
 import kotlin.concurrent.thread
+import kotlin.math.min
+import com.badlogic.gdx.utils.Array as GdxArray
 import com.unciv.ui.utils.AutoScrollPane as ScrollPane
 
 class Language(val language:String, val percentComplete:Int){
@@ -26,22 +31,25 @@ class Language(val language:String, val percentComplete:Int){
 }
 
 class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScreen) {
-    var selectedLanguage: String = "English"
+    private var selectedLanguage: String = "English"
     private val settings = previousScreen.game.settings
-    val innerTable2 = Table(CameraStageBaseScreen.skin)
+    private val optionsTable = Table(CameraStageBaseScreen.skin)
+    private val resolutionArray = GdxArray(arrayOf("750x500", "900x600", "1050x700", "1200x800", "1500x1000"))
 
     init {
         settings.addCompletedTutorialTask("Open the options table")
 
-        rebuildInnerTable()
+        optionsTable.defaults().pad(2.5f)
+        rebuildOptionsTable()
 
-        val scrollPane = ScrollPane(innerTable2, skin)
+        val scrollPane = ScrollPane(optionsTable, skin)
         scrollPane.setOverscroll(false, false)
         scrollPane.fadeScrollBars = false
         scrollPane.setScrollingDisabled(true, false)
         add(scrollPane).maxHeight(screen.stage.height * 0.6f).row()
 
         addCloseButton {
+            previousScreen.game.limitOrientationsHelper?.allowPortrait(settings.allowAndroidPortrait)
             if (previousScreen is WorldScreen)
                 previousScreen.enableNextTurnButtonAfterOptions()
         }
@@ -51,18 +59,18 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
     }
 
     private fun addHeader(text: String) {
-        innerTable2.add(text.toLabel(fontSize = 24)).colspan(2).padTop(if (innerTable2.cells.isEmpty) 0f else 20f).row()
+        optionsTable.add(text.toLabel(fontSize = 24)).colspan(2).padTop(if (optionsTable.cells.isEmpty) 0f else 20f).row()
     }
 
     private fun addYesNoRow(text: String, initialValue: Boolean, updateWorld: Boolean = false, action: ((Boolean) -> Unit)) {
-        innerTable2.add(text.toLabel())
+        optionsTable.add(text.toLabel())
         val button = YesNoButton(initialValue, CameraStageBaseScreen.skin) {
             action(it)
             settings.save()
             if (updateWorld && previousScreen is WorldScreen)
                 previousScreen.shouldUpdate = true
         }
-        innerTable2.add(button).row()
+        optionsTable.add(button).row()
     }
 
     private fun reloadWorldAndOptions() {
@@ -70,15 +78,16 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
         if (previousScreen is WorldScreen) {
             previousScreen.game.worldScreen = WorldScreen(previousScreen.gameInfo, previousScreen.viewingCiv)
             previousScreen.game.setWorldScreen()
+
         } else if (previousScreen is MainMenuScreen) {
             previousScreen.game.setScreen(MainMenuScreen())
         }
-        OptionsPopup(previousScreen.game.screen as CameraStageBaseScreen).open()
+        (previousScreen.game.screen as CameraStageBaseScreen).openOptionsPopup()
     }
 
-    private fun rebuildInnerTable() {
+    private fun rebuildOptionsTable() {
         settings.save()
-        innerTable2.clear()
+        optionsTable.clear()
 
         addHeader("Display options")
 
@@ -86,7 +95,8 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
         addYesNoRow("Show resources and improvements", settings.showResourcesAndImprovements, true) { settings.showResourcesAndImprovements = it }
         addYesNoRow("Show tile yields", settings.showTileYields, true) { settings.showTileYields = it } // JN
         addYesNoRow("Show tutorials", settings.showTutorials, true) { settings.showTutorials = it }
-        addYesNoRow("Show minimap", settings.showMinimap, true) { settings.showMinimap = it }
+        addMinimapSizeSlider()
+
         addYesNoRow("Show pixel units", settings.showPixelUnits, true) { settings.showPixelUnits = it }
         addYesNoRow("Show pixel improvements", settings.showPixelImprovements, true) { settings.showPixelImprovements = it }
 
@@ -102,7 +112,7 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
         }
 
         val continuousRenderingDescription = "When disabled, saves battery life but certain animations will be suspended"
-        innerTable2.add(continuousRenderingDescription.toLabel(fontSize = 14)).colspan(2).padTop(20f).row()
+        optionsTable.add(continuousRenderingDescription.toLabel(fontSize = 14)).colspan(2).padTop(20f).row()
 
         addHeader("Gameplay options")
 
@@ -123,27 +133,77 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
 
         addAutosaveTurnsSelectBox()
 
-        // at the moment tmainmhe notification service only exists on Android
+        // at the moment the notification service only exists on Android
         addNotificationOptions()
 
         addHeader("Other options")
 
-        addYesNoRow("Show experimental world wrap for maps\nHIGHLY EXPERIMENTAL - YOU HAVE BEEN WARNED!",
-                settings.showExperimentalWorldWrap)
-        { settings.showExperimentalWorldWrap = it }
 
-        addYesNoRow("Show experimental tile layering\nHIGHLY EXPERIMENTAL - YOU HAVE BEEN WARNED!",
-                settings.showExperimentalTileLayering)
-        { settings.showExperimentalTileLayering = it }
+        addYesNoRow("{Show experimental world wrap for maps}\n{HIGHLY EXPERIMENTAL - YOU HAVE BEEN WARNED!}".tr(),
+                settings.showExperimentalWorldWrap) {
+            settings.showExperimentalWorldWrap = it
+        }
+        addYesNoRow("{Enable experimental religion in start games}\n{HIGHLY EXPERIMENTAL - UPDATES WILL BREAK SAVES!}".tr(),
+                settings.showExperimentalReligion) {
+            settings.showExperimentalReligion = it
+        }
+
+
+        if (previousScreen.game.limitOrientationsHelper != null) {
+            addYesNoRow("Enable portrait orientation", settings.allowAndroidPortrait) {
+                settings.allowAndroidPortrait = it
+                // Note the following might close the options screen indirectly and delayed
+                previousScreen.game.limitOrientationsHelper!!.allowPortrait(it)
+            }
+        }
 
         addSoundEffectsVolumeSlider()
         addMusicVolumeSlider()
+
         addTranslationGeneration()
-        addModPopup()
+        addModCheckerPopup()
         addSetUserId()
 
-        innerTable2.add("Version".toLabel()).pad(10f)
-        innerTable2.add(previousScreen.game.version.toLabel()).pad(10f).row()
+        optionsTable.add("Version".toLabel()).pad(10f)
+        val versionLabel = previousScreen.game.version.toLabel()
+        if (previousScreen.game.version[0] in '0'..'9')
+            versionLabel.onClick {
+                val url = "https://github.com/yairm210/Unciv/blob/master/changelog.md#" +
+                        previousScreen.game.version.replace(".","")
+                Gdx.net.openURI(url)
+            }
+        optionsTable.add(versionLabel).pad(10f).row()
+    }
+
+    private fun addMinimapSizeSlider() {
+        optionsTable.add("Show minimap".tr())
+
+        // The meaning of the values needs a formula to be synchronized between here and
+        // [Minimap.init]. It goes off-10%-11%..29%-30%-35%-40%-45%-50% - and the percentages
+        // correspond roughly to the minimap's proportion relative to screen dimensions.
+        val offTranslated = "off".tr()  // translate only once and cache in closure
+        val getTipText: (Float)->String = {
+            when (it) {
+                0f -> offTranslated
+                in 0.99f..21.01f -> "%.0f".format(it+9) + "%"
+                else -> "%.0f".format(it * 5 - 75) + "%"
+            }
+        }
+        val minimapSlider = UncivSlider(0f, 25f, 1f,
+            initial = if (settings.showMinimap) settings.minimapSize.toFloat() else 0f,
+            getTipText = getTipText
+        ) {
+            val size = it.toInt()
+            if (size == 0) settings.showMinimap = false
+            else {
+                settings.showMinimap = true
+                settings.minimapSize = size
+            }
+            settings.save()
+            if (previousScreen is WorldScreen)
+                previousScreen.shouldUpdate = true
+        }
+        optionsTable.add(minimapSlider).pad(10f).row()
     }
 
     private fun addSetUserId() {
@@ -165,8 +225,8 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
                         idSetLabel.setFontColor(Color.RED).setText("Invalid ID!".tr())
                     }
                 }
-        innerTable2.add(takeUserIdFromClipboardButton).pad(5f).colspan(2).row()
-        innerTable2.add(idSetLabel).colspan(2).row()
+        optionsTable.add(takeUserIdFromClipboardButton).pad(5f).colspan(2).row()
+        optionsTable.add(idSetLabel).colspan(2).row()
     }
 
     private fun addNotificationOptions() {
@@ -188,7 +248,7 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
     private fun addTranslationGeneration() {
         if (Gdx.app.type == Application.ApplicationType.Desktop) {
             val generateTranslationsButton = "Generate translation files".toTextButton()
-            generateTranslationsButton.onClick {
+            val generateAction = {
                 val translations = Translations()
                 translations.readAllLanguagesTranslation()
                 TranslationFileWriter.writeNewTranslationFiles(translations)
@@ -196,64 +256,76 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
                 generateTranslationsButton.setText("Translation files are generated successfully.".tr())
                 generateTranslationsButton.disable()
             }
-            innerTable2.add(generateTranslationsButton).colspan(2).row()
+            generateTranslationsButton.onClick(generateAction)
+            keyPressDispatcher[Input.Keys.F12] = generateAction
+            generateTranslationsButton.addTooltip("F12",18f)
+            optionsTable.add(generateTranslationsButton).colspan(2).row()
         }
     }
 
-    private fun addModPopup() {
-        val generateTranslationsButton = "Locate mod errors".toTextButton()
-        generateTranslationsButton.onClick {
-            var text = ""
+    private fun addModCheckerPopup() {
+        //if (RulesetCache.isEmpty()) return
+        val modCheckerButton = "Locate mod errors".toTextButton()
+        modCheckerButton.onClick {
+            val lines = ArrayList<String>()
             for (mod in RulesetCache.values) {
                 val modLinks = mod.checkModLinks()
-                if (modLinks != "")
-                    text += "\n\n" + mod.name + "\n\n" + modLinks
+                if (modLinks.isNotOK()) {
+                    lines += ""
+                    lines += mod.name
+                    lines += ""
+                    lines += modLinks.message
+                    lines += ""
+                }
             }
+            if (lines.isEmpty()) lines += "{No problems found}."
             val popup = Popup(screen)
-            popup.add(ScrollPane(text.toLabel()).apply { setOverscroll(false, false) })
+            popup.name = "ModCheckerPopup"
+            popup.add(ScrollPane(lines.joinToString("\n").toLabel()).apply { setOverscroll(false, false) })
                     .maxHeight(screen.stage.height / 2).row()
             popup.addCloseButton()
             popup.open(true)
         }
-        innerTable2.add(generateTranslationsButton).colspan(2).row()
+        optionsTable.add(modCheckerButton).colspan(2).row()
     }
 
     private fun addSoundEffectsVolumeSlider() {
-        innerTable2.add("Sound effects volume".tr())
+        optionsTable.add("Sound effects volume".tr())
 
-        val soundEffectsVolumeSlider = Slider(0f, 1.0f, 0.1f, false, skin)
-        soundEffectsVolumeSlider.value = settings.soundEffectsVolume
-        soundEffectsVolumeSlider.onChange {
-            settings.soundEffectsVolume = soundEffectsVolumeSlider.value
+        val soundEffectsVolumeSlider = UncivSlider(0f, 1.0f, 0.1f,
+            initial = settings.soundEffectsVolume
+        ) {
+            settings.soundEffectsVolume = it
             settings.save()
-            Sounds.play(UncivSound.Click)
         }
-        innerTable2.add(soundEffectsVolumeSlider).pad(10f).row()
+        optionsTable.add(soundEffectsVolumeSlider).pad(5f).row()
     }
 
     private fun addMusicVolumeSlider() {
         val musicLocation = Gdx.files.local(previousScreen.game.musicLocation)
         if (musicLocation.exists()) {
-            innerTable2.add("Music volume".tr())
+            optionsTable.add("Music volume".tr())
 
-            val musicVolumeSlider = Slider(0f, 1.0f, 0.1f, false, skin)
-            musicVolumeSlider.value = settings.musicVolume
-            musicVolumeSlider.onChange {
-                settings.musicVolume = musicVolumeSlider.value
+            val musicVolumeSlider = UncivSlider(0f, 1.0f, 0.1f,
+                initial = settings.musicVolume,
+                sound = UncivSound.Silent
+            ) {
+                settings.musicVolume = it
                 settings.save()
 
                 val music = previousScreen.game.music
                 if (music == null) // restart music, if it was off at the app start
                     thread(name = "Music") { previousScreen.game.startMusic() }
 
-                music?.volume = 0.4f * musicVolumeSlider.value
+                music?.volume = 0.4f * it
             }
-            innerTable2.add(musicVolumeSlider).pad(10f).row()
+            musicVolumeSlider.value = settings.musicVolume
+            optionsTable.add(musicVolumeSlider).pad(5f).row()
         } else {
             val downloadMusicButton = "Download music".toTextButton()
-            innerTable2.add(downloadMusicButton).colspan(2).row()
+            optionsTable.add(downloadMusicButton).colspan(2).row()
             val errorTable = Table()
-            innerTable2.add(errorTable).colspan(2).row()
+            optionsTable.add(errorTable).colspan(2).row()
 
             downloadMusicButton.onClick {
                 downloadMusicButton.disable()
@@ -266,7 +338,7 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
                         val file = DropBox.downloadFile("/Music/thatched-villagers.mp3")
                         musicLocation.write(file, false)
                         Gdx.app.postRunnable {
-                            rebuildInnerTable()
+                            rebuildOptionsTable()
                             previousScreen.game.startMusic()
                         }
                     } catch (ex: Exception) {
@@ -281,14 +353,12 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
     }
 
     private fun addResolutionSelectBox() {
-        innerTable2.add("Resolution".toLabel())
+        optionsTable.add("Resolution".toLabel())
 
         val resolutionSelectBox = SelectBox<String>(skin)
-        val resolutionArray = Array<String>()
-        resolutionArray.addAll("750x500", "900x600", "1050x700", "1200x800", "1500x1000")
         resolutionSelectBox.items = resolutionArray
         resolutionSelectBox.selected = settings.resolution
-        innerTable2.add(resolutionSelectBox).minWidth(240f).pad(10f).row()
+        optionsTable.add(resolutionSelectBox).minWidth(240f).pad(10f).row()
 
         resolutionSelectBox.onChange {
             settings.resolution = resolutionSelectBox.selected
@@ -297,33 +367,33 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
     }
 
     private fun addTileSetSelectBox() {
-        innerTable2.add("Tileset".toLabel())
+        optionsTable.add("Tileset".toLabel())
 
         val tileSetSelectBox = SelectBox<String>(skin)
-        val tileSetArray = Array<String>()
-        val tileSets = ImageGetter.textureRegionDrawables.keys.asSequence().filter { it.startsWith("TileSets") }
-                .map { it.split("/")[1] }.distinct()
+        val tileSetArray = GdxArray<String>()
+        val tileSets = ImageGetter.getAvailableTilesets()
         for (tileset in tileSets) tileSetArray.add(tileset)
         tileSetSelectBox.items = tileSetArray
         tileSetSelectBox.selected = settings.tileSet
-        innerTable2.add(tileSetSelectBox).minWidth(240f).pad(10f).row()
+        optionsTable.add(tileSetSelectBox).minWidth(240f).pad(10f).row()
 
         tileSetSelectBox.onChange {
             settings.tileSet = tileSetSelectBox.selected
+            TileSetCache.assembleTileSetConfigs()
             reloadWorldAndOptions()
         }
     }
 
     private fun addAutosaveTurnsSelectBox() {
-        innerTable2.add("Turns between autosaves".toLabel())
+        optionsTable.add("Turns between autosaves".toLabel())
 
         val autosaveTurnsSelectBox = SelectBox<Int>(skin)
-        val autosaveTurnsArray = Array<Int>()
+        val autosaveTurnsArray = GdxArray<Int>()
         autosaveTurnsArray.addAll(1, 2, 5, 10)
         autosaveTurnsSelectBox.items = autosaveTurnsArray
         autosaveTurnsSelectBox.selected = settings.turnsBetweenAutosaves
 
-        innerTable2.add(autosaveTurnsSelectBox).pad(10f).row()
+        optionsTable.add(autosaveTurnsSelectBox).pad(10f).row()
 
         autosaveTurnsSelectBox.onChange {
             settings.turnsBetweenAutosaves = autosaveTurnsSelectBox.selected
@@ -332,15 +402,15 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
     }
 
     private fun addMultiplayerTurnCheckerDelayBox() {
-        innerTable2.add("Time between turn checks out-of-game (in minutes)".toLabel())
+        optionsTable.add("Time between turn checks out-of-game (in minutes)".toLabel())
 
         val checkDelaySelectBox = SelectBox<Int>(skin)
-        val possibleDelaysArray = Array<Int>()
+        val possibleDelaysArray = GdxArray<Int>()
         possibleDelaysArray.addAll(1, 2, 5, 15)
         checkDelaySelectBox.items = possibleDelaysArray
         checkDelaySelectBox.selected = settings.multiplayerTurnCheckerDelayInMinutes
 
-        innerTable2.add(checkDelaySelectBox).pad(10f).row()
+        optionsTable.add(checkDelaySelectBox).pad(10f).row()
 
         checkDelaySelectBox.onChange {
             settings.multiplayerTurnCheckerDelayInMinutes = checkDelaySelectBox.selected
@@ -350,18 +420,18 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
 
     private fun addLanguageSelectBox() {
         val languageSelectBox = SelectBox<Language>(skin)
-        val languageArray = Array<Language>()
+        val languageArray = GdxArray<Language>()
         previousScreen.game.translations.percentCompleteOfLanguages
                 .map { Language(it.key, if (it.key == "English") 100 else it.value) }
                 .sortedByDescending { it.percentComplete }
                 .forEach { languageArray.add(it) }
         if (languageArray.size == 0) return
 
-        innerTable2.add("Language".toLabel())
+        optionsTable.add("Language".toLabel())
         languageSelectBox.items = languageArray
         val matchingLanguage = languageArray.firstOrNull { it.language == settings.language }
-        languageSelectBox.selected = if (matchingLanguage != null) matchingLanguage else languageArray.first()
-        innerTable2.add(languageSelectBox).minWidth(240f).pad(10f).row()
+        languageSelectBox.selected = matchingLanguage ?: languageArray.first()
+        optionsTable.add(languageSelectBox).minWidth(240f).pad(10f).row()
 
         languageSelectBox.onChange {
             // Sometimes the "changed" is triggered even when we didn't choose something
@@ -386,7 +456,7 @@ class OptionsPopup(val previousScreen:CameraStageBaseScreen) : Popup(previousScr
 
         Usage: YesNoButton(someSetting: Boolean, skin) { someSetting = it; sideEffects() }
  */
-private fun Boolean.toYesNo(): String = (if (this) "Yes" else "No").tr()
+private fun Boolean.toYesNo(): String = (if (this) Constants.yes else Constants.no).tr()
 private class YesNoButton(initialValue: Boolean, skin: Skin, action: (Boolean) -> Unit)
         : TextButton (initialValue.toYesNo(), skin ) {
 

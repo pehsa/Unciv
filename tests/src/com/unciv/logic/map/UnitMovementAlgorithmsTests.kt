@@ -10,7 +10,6 @@ import com.unciv.models.ruleset.Nation
 import com.unciv.models.ruleset.Ruleset
 import com.unciv.models.ruleset.RulesetCache
 import com.unciv.models.ruleset.unit.BaseUnit
-import com.unciv.models.ruleset.unit.UnitType
 import com.unciv.testing.GdxTestRunner
 import org.junit.Assert
 import org.junit.Before
@@ -30,6 +29,7 @@ class UnitMovementAlgorithmsTests {
         RulesetCache.loadRulesets()
         ruleSet = RulesetCache.getBaseRuleset()
         tile.ruleset = ruleSet
+        tile.baseTerrain = Constants.grassland
         civInfo.tech.techsResearched.addAll(ruleSet.technologies.keys)
         civInfo.tech.embarkedUnitsCanEnterOcean = true
         civInfo.tech.unitsCanEmbark = true
@@ -38,15 +38,23 @@ class UnitMovementAlgorithmsTests {
             cities = arrayListOf("The Capital")
         }
         unit.civInfo = civInfo
+
+
+        // Needed for convertHillToTerrainFeature to not crash
+        val tileMap = TileMap()
+        tileMap.tileMatrix.add(ArrayList<TileInfo?>().apply { add(tile) })
+        tile.tileMap = tileMap
+        tile.setTransients()
     }
 
     @Test
     fun canPassThroughPassableTerrains() {
         for (terrain in ruleSet.terrains.values) {
             tile.baseTerrain = terrain.name
+            tile.terrainFeatures.clear()
             tile.setTransients()
 
-            unit.baseUnit = BaseUnit().apply { unitType = UnitType.Melee }
+            unit.baseUnit = BaseUnit().apply { unitType = "Sword"; ruleset = ruleSet }
 
             Assert.assertTrue(terrain.name, terrain.impassable != unit.movement.canPassThrough(tile))
         }
@@ -54,27 +62,32 @@ class UnitMovementAlgorithmsTests {
 
     @Test
     fun unitCanEnterTheCity() {
+
         val map = TileMap()
-        tile.baseTerrain = Constants.hill
-        tile.tileMap = map
-        tile.setTransients()
+        val cityTile = tile.clone() // reset, so that the isCoastalTile won't be carried over from previous tests
+        cityTile.baseTerrain = Constants.grassland
+        cityTile.tileMap = map
+        cityTile.ruleset = ruleSet
+        cityTile.setTransients()
+        map.tileMatrix.add(arrayListOf(cityTile)) // needed for tile.setTransients()
 
         val otherTile = tile.clone()
         otherTile.baseTerrain = Constants.coast
         otherTile.position.y = 1f
-
-        map.tileMatrix.add(arrayListOf(tile, otherTile))
+        map.tileMatrix[0].add(otherTile)
 
         val city = CityInfo()
-        city.location = tile.position
+        city.location = cityTile.position
         city.civInfo = civInfo
-        tile.owningCity = city
+        cityTile.owningCity = city
 
-        for (type in UnitType.values())
+        for (type in ruleSet.unitTypes)
         {
             unit.owner = civInfo.civName
-            unit.baseUnit = BaseUnit().apply { unitType = type }
-            Assert.assertTrue(type.name, unit.movement.canPassThrough(tile))
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
+            if(!unit.movement.canPassThrough(cityTile))
+                unit.movement.canPassThrough(cityTile)
+            Assert.assertTrue(type.key, unit.movement.canPassThrough(cityTile))
         }
     }
 
@@ -84,12 +97,11 @@ class UnitMovementAlgorithmsTests {
             if (terrain.impassable) continue
             tile.baseTerrain = terrain.name
             tile.setTransients()
-
-            for (type in UnitType.values()) {
-                if (type == UnitType.City) continue
-                unit.baseUnit = BaseUnit().apply { unitType = type }
-                Assert.assertTrue("%s cannot be at %s".format(type, terrain.name),
-                        (type.isWaterUnit() && tile.isLand) != unit.movement.canPassThrough(tile))
+            
+            for (type in ruleSet.unitTypes) {
+                unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
+                Assert.assertTrue("%s cannot be at %s".format(type.key, terrain.name),
+                        (unit.baseUnit.isWaterUnit() && tile.isLand) != unit.movement.canPassThrough(tile))
             }
         }
     }
@@ -101,16 +113,14 @@ class UnitMovementAlgorithmsTests {
         tile.terrainFeatures.add(Constants.ice)
         tile.setTransients()
 
-        for (type in UnitType.values()) {
-            unit.baseUnit = BaseUnit().apply { unitType = type }
-
-            if (type == UnitType.WaterSubmarine) {
-                unit.baseUnit.uniques.add("Can enter ice tiles")
-            }
+        for (type in ruleSet.unitTypes) {
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
             unit.updateUniques()
 
-            Assert.assertTrue("$type cannot be in Ice",
-                    (type == UnitType.WaterSubmarine) == unit.movement.canPassThrough(tile))
+            Assert.assertTrue("$type cannot be in Ice", (
+                                type.value.uniques.contains("Can enter ice tiles"))
+                                || type.value.uniques.contains("Can pass through impassable tiles"
+                            ) == unit.movement.canPassThrough(tile))
         }
     }
 
@@ -120,8 +130,8 @@ class UnitMovementAlgorithmsTests {
         tile.naturalWonder = "Mount Fuji"
         tile.setTransients()
 
-        for (type in UnitType.values()) {
-            unit.baseUnit = BaseUnit().apply { unitType = type }
+        for (type in ruleSet.unitTypes) {
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
 
             Assert.assertFalse("$type must not enter Wonder tile", unit.movement.canPassThrough(tile))
         }
@@ -135,11 +145,11 @@ class UnitMovementAlgorithmsTests {
         tile.baseTerrain = Constants.coast
         tile.setTransients()
 
-        for (type in UnitType.values()) {
-            unit.baseUnit = BaseUnit().apply { unitType = type }
+        for (type in ruleSet.unitTypes) {
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
 
             Assert.assertTrue("$type cannot be in Coast",
-                    unit.type.isLandUnit() != unit.movement.canPassThrough(tile))
+                    unit.baseUnit.isLandUnit() != unit.movement.canPassThrough(tile))
         }
     }
 
@@ -151,11 +161,11 @@ class UnitMovementAlgorithmsTests {
         tile.baseTerrain = Constants.ocean
         tile.setTransients()
 
-        for (type in UnitType.values()) {
-            unit.baseUnit = BaseUnit().apply { unitType = type }
+        for (type in ruleSet.unitTypes) {
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
 
             Assert.assertTrue("$type cannot be in Ocean",
-                    unit.type.isLandUnit() != unit.movement.canPassThrough(tile))
+                    unit.baseUnit.isLandUnit() != unit.movement.canPassThrough(tile))
         }
     }
 
@@ -165,24 +175,25 @@ class UnitMovementAlgorithmsTests {
         tile.baseTerrain = Constants.ocean
         tile.setTransients()
 
-        for (type in UnitType.values()) {
+        for (type in ruleSet.unitTypes) {
             unit.baseUnit = BaseUnit().apply {
-                unitType = type
-                if (type == UnitType.Melee)
+                unitType = type.key
+                ruleset = ruleSet
+                if (this.isMelee())
                     uniques.add("Cannot enter ocean tiles")
-                if (type == UnitType.Ranged)
+                if (this.isRanged())
                     uniques.add("Cannot enter ocean tiles until Astronomy")
             }
             unit.updateUniques()
 
             Assert.assertTrue("$type cannot be in Ocean",
-                    (type == UnitType.Melee) != unit.movement.canPassThrough(tile))
+                    (unit.baseUnit.isMelee()) != unit.movement.canPassThrough(tile))
 
             civInfo.tech.techsResearched.remove("Astronomy")
 
             Assert.assertTrue("$type cannot be in Ocean until Astronomy",
-                    (type == UnitType.Melee ||
-                              type == UnitType.Ranged) != unit.movement.canPassThrough(tile))
+                    (unit.baseUnit.isMelee() || unit.baseUnit.isRanged()) 
+                                != unit.movement.canPassThrough(tile))
 
             civInfo.tech.techsResearched.add("Astronomy")
         }
@@ -200,8 +211,8 @@ class UnitMovementAlgorithmsTests {
         otherUnit.civInfo = otherCiv
         tile.militaryUnit = otherUnit
 
-        for (type in UnitType.values()) {
-            unit.baseUnit = BaseUnit().apply { unitType = type }
+        for (type in ruleSet.unitTypes) {
+            unit.baseUnit = BaseUnit().apply { unitType = type.key; ruleset = ruleSet }
 
             Assert.assertFalse("$type must not enter occupied tile", unit.movement.canPassThrough(tile))
         }
@@ -221,7 +232,7 @@ class UnitMovementAlgorithmsTests {
         city.civInfo = otherCiv
         tile.owningCity = city
 
-        unit.baseUnit = BaseUnit().apply { unitType = UnitType.Melee }
+        unit.baseUnit = BaseUnit().apply { unitType = ruleSet.unitTypes.keys.first(); ruleset = ruleSet }
         unit.owner = civInfo.civName
 
         Assert.assertFalse("Unit must not enter other civ tile", unit.movement.canPassThrough(tile))

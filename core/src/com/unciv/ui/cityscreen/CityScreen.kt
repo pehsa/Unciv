@@ -2,24 +2,27 @@ package com.unciv.ui.cityscreen
 
 import com.badlogic.gdx.Input
 import com.badlogic.gdx.graphics.Color
-import com.badlogic.gdx.scenes.scene2d.InputEvent
-import com.badlogic.gdx.scenes.scene2d.InputListener
 import com.badlogic.gdx.scenes.scene2d.ui.Table
 import com.badlogic.gdx.utils.Align
 import com.unciv.UncivGame
 import com.unciv.logic.city.CityInfo
 import com.unciv.logic.city.IConstruction
+import com.unciv.logic.city.INonPerpetualConstruction
 import com.unciv.logic.map.TileInfo
 import com.unciv.ui.map.TileGroupMap
 import com.unciv.ui.tilegroups.TileSetStrings
 import com.unciv.ui.utils.*
 import java.util.*
-import com.unciv.ui.utils.AutoScrollPane as ScrollPane
 
-class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
+class CityScreen(
+    internal val city: CityInfo,
+    var selectedConstruction: IConstruction? = null,
     var selectedTile: TileInfo? = null
-    var selectedConstruction: IConstruction? = null
-    var keyListener: InputListener? = null
+): CameraStageBaseScreen() {
+    companion object {
+        /** Distance from stage edges to floating widgets */
+        const val posFromEdge = 5f
+    }
 
     /** Toggles or adds/removes all state changing buttons */
     val canChangeState = UncivGame.Current.worldScreen.canChangeState
@@ -29,8 +32,11 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
 
     // Clockwise from the top-left
 
-    /** Displays current production, production queue and available productions list - sits on LEFT */
-    private var constructionsTable = ConstructionsTable(this)
+    /** Displays current production, production queue and available productions list
+     *  Not a widget, but manages two: construction queue, info toggle button, buy buttons
+     *  in a Table holder on upper LEFT, and available constructions in a ScrollPane lower LEFT.
+     */
+    private var constructionsTable = CityConstructionsTable(this)
 
     /** Displays stats, buildings, specialists and stats drilldown - sits on TOP LEFT, can be toggled to */
     private var cityInfoTable = CityInfoTable(this)
@@ -59,6 +65,9 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
     /** Holds City tiles group*/
     private var tileGroups = ArrayList<CityTileGroup>()
 
+    /** The ScrollPane for the background map view of the city surroundings */
+    private val mapScrollPane = ZoomableScrollPane()
+
     init {
         onBackButtonClicked { game.setWorldScreen() }
         UncivGame.Current.settings.addCompletedTutorialTask("Enter city screen")
@@ -67,52 +76,82 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
 
         //stage.setDebugTableUnderMouse(true)
         stage.addActor(cityStatsTable)
-        stage.addActor(constructionsTable)
-        stage.addActor(tileTable)
-        stage.addActor(selectedConstructionTable)
-        stage.addActor(cityPickerTable)
-        stage.addActor(exitCityButton)
+        constructionsTable.addActorsToStage()
         stage.addActor(cityInfoTable)
+        stage.addActor(selectedConstructionTable)
+        stage.addActor(tileTable)
+        stage.addActor(cityPickerTable)  // add late so it's top in Z-order and doesn't get covered in cramped portrait
+        stage.addActor(exitCityButton)
         update()
 
-        keyListener = getKeyboardListener()
-        stage.addListener(keyListener)
+        keyPressDispatcher[Input.Keys.LEFT] = { page(-1) }
+        keyPressDispatcher[Input.Keys.RIGHT] = { page(1) }
+        keyPressDispatcher['T'] = {
+            if (selectedTile != null)
+                tileTable.askToBuyTile(selectedTile!!)
+        }
+        keyPressDispatcher['B'] = {
+            if (selectedConstruction is INonPerpetualConstruction)
+                constructionsTable.askToBuyConstruction(selectedConstruction as INonPerpetualConstruction)
+        }
     }
 
     internal fun update() {
+        // Recalculate Stats
+        city.cityStats.update()
+
+        // Left side, top and bottom: Construction queue / details
         if (showConstructionsTable) {
             constructionsTable.isVisible = true
             cityInfoTable.isVisible = false
+            constructionsTable.update(selectedConstruction)
         } else {
             constructionsTable.isVisible = false
             cityInfoTable.isVisible = true
+            cityInfoTable.update()
+            cityInfoTable.setPosition(posFromEdge, stage.height - posFromEdge, Align.topLeft)
         }
 
-        city.cityStats.update()
-
-        constructionsTable.update(selectedConstruction)
-        constructionsTable.setPosition(5f, stage.height - 5f, Align.topLeft)
-
-        cityInfoTable.update()
-        cityInfoTable.setPosition(5f, stage.height - 5f, Align.topLeft)
-
-        exitCityButton.centerX(stage)
-        exitCityButton.y = 10f
-        cityPickerTable.update()
-        cityPickerTable.centerX(stage)
-        cityPickerTable.setY(exitCityButton.top + 10f, Align.bottom)
-
+        // Bottom right: Tile or selected construction info
         tileTable.update(selectedTile)
-        tileTable.setPosition(stage.width - 5f, 5f, Align.bottomRight)
-
+        tileTable.setPosition(stage.width - posFromEdge, posFromEdge, Align.bottomRight)
         selectedConstructionTable.update(selectedConstruction)
-        selectedConstructionTable.setPosition(stage.width - 5f, 5f, Align.bottomRight)
+        selectedConstructionTable.setPosition(stage.width - posFromEdge, posFromEdge, Align.bottomRight)
 
+        // In portrait mode only: calculate already occupied horizontal space
+        val rightMargin = when {
+            !isPortrait() -> 0f
+            selectedTile != null -> tileTable.packIfNeeded().width
+            selectedConstruction != null -> selectedConstructionTable.packIfNeeded().width
+            else -> posFromEdge
+        }
+        val leftMargin = when {
+            !isPortrait() -> 0f
+            showConstructionsTable -> constructionsTable.getLowerWidth()
+            else -> cityInfoTable.packIfNeeded().width
+        }
+
+        // Bottom center: Name, paging, exit city button
+        val centeredX = (stage.width - leftMargin - rightMargin) / 2 + leftMargin
+        exitCityButton.setPosition(centeredX, 10f, Align.bottom)
+        cityPickerTable.update()
+        cityPickerTable.setPosition(centeredX, exitCityButton.top + 10f, Align.bottom)
+
+        // Top right of screen: Stats / Specialists
         cityStatsTable.update()
-        cityStatsTable.setPosition(stage.width - 5f, stage.height - 5f, Align.topRight)
+        cityStatsTable.setPosition(stage.width - posFromEdge, stage.height - posFromEdge, Align.topRight)
 
+        // Top center: Annex/Raze button
         updateAnnexAndRazeCityButton()
+
+        // Rest of screen: Map of surroundings
         updateTileGroups()
+        if (isPortrait()) mapScrollPane.apply {
+            // center scrolling so city center sits more to the bottom right
+            scrollX = (maxX - constructionsTable.getLowerWidth() - posFromEdge) / 2
+            scrollY = (maxY - cityStatsTable.packIfNeeded().height - posFromEdge + cityPickerTable.top) / 2
+            updateVisualScroll()
+        }
     }
 
     private fun updateTileGroups() {
@@ -150,7 +189,7 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
             val razeCityButton = "Raze city".toTextButton()
             razeCityButton.labelCell.pad(10f)
             razeCityButton.onClick { city.isBeingRazed = true; update() }
-            if (!canChangeState || city.isOriginalCapital)
+            if (!canChangeState || !city.canBeDestroyed())
                 razeCityButton.disable()
 
             razeCityButtonHolder.add(razeCityButton).colspan(cityPickerTable.columns)
@@ -162,9 +201,9 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
             razeCityButtonHolder.add(stopRazingCityButton).colspan(cityPickerTable.columns)
         }
         razeCityButtonHolder.pack()
-        //goToWorldButton.setSize(goToWorldButton.prefWidth, goToWorldButton.prefHeight)
-        razeCityButtonHolder.centerX(stage)
-        razeCityButtonHolder.y = stage.height - razeCityButtonHolder.height - 20
+        val centerX = if (!isPortrait()) stage.width / 2
+            else constructionsTable.getUpperWidth().let { it + (stage.width - cityStatsTable.width - it) / 2 }
+        razeCityButtonHolder.setPosition(centerX, stage.height - 20f, Align.top)
         stage.addActor(razeCityButtonHolder)
     }
 
@@ -225,20 +264,19 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
         }
 
         val tileMapGroup = TileGroupMap(tileGroups, stage.width / 2, stage.height / 2, tileGroupsToUnwrap = tilesToUnwrap)
-        val scrollPane = ScrollPane(tileMapGroup)
-        scrollPane.setSize(stage.width, stage.height)
-        scrollPane.setOrigin(stage.width / 2, stage.height / 2)
-        scrollPane.center(stage)
-        stage.addActor(scrollPane)
+        mapScrollPane.actor = tileMapGroup
+        mapScrollPane.setSize(stage.width, stage.height)
+        mapScrollPane.setOrigin(stage.width / 2, stage.height / 2)
+        mapScrollPane.center(stage)
+        stage.addActor(mapScrollPane)
 
-        scrollPane.layout() // center scrolling
-        scrollPane.scrollPercentX = 0.5f
-        scrollPane.scrollPercentY = 0.5f
-        scrollPane.updateVisualScroll()
+        mapScrollPane.layout() // center scrolling
+        mapScrollPane.scrollPercentX = 0.5f
+        mapScrollPane.scrollPercentY = 0.5f
+        mapScrollPane.updateVisualScroll()
     }
 
     fun exit() {
-        stage.removeListener(keyListener)
         game.setWorldScreen()
         game.worldScreen.mapHolder.setCenterPosition(city.location)
         game.worldScreen.bottomUnitTable.selectUnit()
@@ -250,23 +288,15 @@ class CityScreen(internal val city: CityInfo): CameraStageBaseScreen() {
         if (numCities == 0) return
         val indexOfCity = civInfo.cities.indexOf(city)
         val indexOfNextCity = (indexOfCity + delta + numCities) % numCities
-        // not entirely sure this is necessary, since we're changing screens we're changing stages as well?
-        stage.removeListener(keyListener)
         val newCityScreen = CityScreen(civInfo.cities[indexOfNextCity])
         newCityScreen.showConstructionsTable = showConstructionsTable // stay on stats drilldown between cities
         newCityScreen.update()
         game.setScreen(newCityScreen)
     }
 
-    private fun getKeyboardListener(): InputListener = object : InputListener() {
-        override fun keyDown(event: InputEvent?, keyCode: Int): Boolean {
-            if (event == null) return super.keyDown(event, keyCode)
-            when (event.keyCode) {
-                Input.Keys.LEFT -> page(-1)
-                Input.Keys.RIGHT -> page(1)
-                else -> return super.keyDown(event, keyCode)
-            }
-            return true
+    override fun resize(width: Int, height: Int) {
+        if (stage.viewport.screenWidth != width || stage.viewport.screenHeight != height) {
+            game.setScreen(CityScreen(city))
         }
     }
 }

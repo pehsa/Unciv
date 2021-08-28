@@ -1,6 +1,5 @@
 package com.unciv.logic.civilization
 
-import com.badlogic.gdx.graphics.Color
 import com.unciv.logic.map.TileInfo
 import com.unciv.models.ruleset.tile.ResourceSupplyList
 
@@ -13,12 +12,28 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
 
         val newViewableInvisibleTiles = HashSet<TileInfo>()
         newViewableInvisibleTiles.addAll(civInfo.getCivUnits()
-                .filter { it.hasUnique("Can attack submarines") }
-                .flatMap { it.viewableTiles.asSequence() })
+            // "Can attack submarines" unique deprecated since 3.16.9
+            .filter { attacker -> attacker.hasUnique("Can see invisible [] units") || attacker.hasUnique("Can attack submarines") }
+            .flatMap { attacker ->
+                attacker.viewableTiles
+                    .asSequence()
+                    .filter { tile -> 
+                        ( tile.militaryUnit != null 
+                            && attacker.getMatchingUniques("Can see invisible [] units")
+                                .any { unique -> tile.militaryUnit!!.matchesFilter(unique.params[0]) }
+                        ) || (
+                            tile.militaryUnit != null
+                            // "Can attack submarines" unique deprecated since 3.16.9
+                            && attacker.hasUnique("Can attack submarines") 
+                            && tile.militaryUnit!!.matchesFilter("Submarine")
+                        )
+                    } 
+            }
+        )
         civInfo.viewableInvisibleUnitsTiles = newViewableInvisibleTiles
 
 
-        // updating the viewable tiles also affects the explored tiles, obvs
+        // updating the viewable tiles also affects the explored tiles, obviously.
         // So why don't we play switcharoo with the explored tiles as well?
         // Well, because it gets REALLY LARGE so it's a lot of memory space,
         // and we never actually iterate on the explored tiles (only check contains()),
@@ -39,7 +54,7 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
             for (entry in viewedCivs) {
                 val metCiv = entry.key
                 if (metCiv == civInfo || metCiv.isBarbarian() || civInfo.diplomacy.containsKey(metCiv.civName)) continue
-                civInfo.meetCivilization(metCiv)
+                civInfo.makeCivilizationsMeet(metCiv)
                 civInfo.addNotification("We have encountered [" + metCiv.civName + "]!", entry.value.position, metCiv.civName, NotificationIcon.Diplomacy)
                 metCiv.addNotification("We have encountered [" + civInfo.civName + "]!", entry.value.position, civInfo.civName, NotificationIcon.Diplomacy)
             }
@@ -96,7 +111,7 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
             var goldGained = 0
             val discoveredNaturalWonders = civInfo.gameInfo.civilizations.filter { it != civInfo && it.isMajorCiv() }
                     .flatMap { it.naturalWonders }
-            if (tile.containsUnique("Grants 500 Gold to the first civilization to discover it")
+            if (tile.hasUnique("Grants 500 Gold to the first civilization to discover it")
                     && !discoveredNaturalWonders.contains(tile.naturalWonder!!)) {
                 goldGained += 500
             }
@@ -108,7 +123,7 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
             }
 
             if (goldGained > 0) {
-                civInfo.gold += goldGained
+                civInfo.addGold(goldGained)
                 civInfo.addNotification("We have received [" + goldGained + "] Gold for discovering [" + tile.naturalWonder + "]", NotificationIcon.Gold)
             }
 
@@ -131,8 +146,9 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
                 if (city !in civInfo.citiesConnectedToCapitalToMediums && city.civInfo == civInfo && city != civInfo.getCapital())
                     civInfo.addNotification("[${city.name}] has been connected to your capital!", city.location, NotificationIcon.Gold)
 
+            // This may still contain cities that have just been destroyed by razing - thus the population test
             for (city in civInfo.citiesConnectedToCapitalToMediums.keys)
-                if (!citiesReachedToMediums.containsKey(city) && city.civInfo == civInfo)
+                if (!citiesReachedToMediums.containsKey(city) && city.civInfo == civInfo && city.population.population > 0)
                     civInfo.addNotification("[${city.name}] has been disconnected from your capital!", city.location, NotificationIcon.Gold)
         }
 
@@ -147,12 +163,14 @@ class CivInfoTransientUpdater(val civInfo: CivilizationInfo) {
             var resourceBonusPercentage = 1f
             for (unique in civInfo.getMatchingUniques("Quantity of Resources gifted by City-States increased by []%"))
                 resourceBonusPercentage += unique.params[0].toFloat() / 100
-            for (otherCiv in civInfo.getKnownCivs().filter { it.getAllyCiv() == civInfo.civName }) {
-                for (city in otherCiv.cities) {
-                    for (resourceSupply in city.getCityResources())
-                        newDetailedCivResources.add(resourceSupply.resource,
-                                (resourceSupply.amount * resourceBonusPercentage).toInt(), "City-States")
-                }
+            for (city in civInfo.getKnownCivs().filter { it.getAllyCiv() == civInfo.civName }
+                .flatMap { it.cities }) {
+                for (resourceSupply in city.getCityResources())
+                    if (resourceSupply.origin != "Buildings") // IGNORE the fact that they consume their own resources - #4769
+                        newDetailedCivResources.add(
+                            resourceSupply.resource,
+                            (resourceSupply.amount * resourceBonusPercentage).toInt(), "City-States"
+                        )
             }
         }
 

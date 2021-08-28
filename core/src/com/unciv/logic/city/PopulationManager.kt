@@ -1,6 +1,5 @@
 package com.unciv.logic.city
 
-import com.badlogic.gdx.graphics.Color
 import com.unciv.logic.automation.Automation
 import com.unciv.logic.civilization.NotificationIcon
 import com.unciv.logic.map.TileInfo
@@ -15,6 +14,7 @@ class PopulationManager {
     lateinit var cityInfo: CityInfo
 
     var population = 1
+        private set
     var foodStored = 0
 
     // In favor of this bad boy
@@ -42,6 +42,8 @@ class PopulationManager {
     fun getFoodToNextPopulation(): Int {
         // civ v math, civilization.wikia
         var foodRequired = 15 + 6 * (population - 1) + floor((population - 1).toDouble().pow(1.8))
+        if (cityInfo.civInfo.isCityState())
+            foodRequired *= 1.5f
         if (!cityInfo.civInfo.isPlayerCivilization())
             foodRequired *= cityInfo.civInfo.gameInfo.getDifficulty().aiCityGrowthModifier
         return foodRequired.toInt()
@@ -54,16 +56,19 @@ class PopulationManager {
         if (food < 0)
             cityInfo.civInfo.addNotification("[${cityInfo.name}] is starving!", cityInfo.location, NotificationIcon.Growth, NotificationIcon.Death)
         if (foodStored < 0) {        // starvation!
-            if (population > 1) population--
+            if (population > 1) addPopulation(-1)
             foodStored = 0
         }
         if (foodStored >= getFoodToNextPopulation()) {  // growth!
             foodStored -= getFoodToNextPopulation()
-            val percentOfFoodCarriedOver = cityInfo.cityConstructions.builtBuildingUniqueMap
-                    .getUniques("[]% of food is carried over after population increases")
-                    .sumBy { it.params[0].toInt() }
+            var percentOfFoodCarriedOver = cityInfo
+                .getMatchingUniques("[]% of food is carried over [] after population increases")
+                .filter { cityInfo.matchesFilter(it.params[1]) }
+                .sumBy { it.params[0].toInt() }
+            // Try to avoid runaway food gain in mods, just in case 
+            if (percentOfFoodCarriedOver > 95) percentOfFoodCarriedOver = 95 
             foodStored += (getFoodToNextPopulation() * percentOfFoodCarriedOver / 100f).toInt()
-            population++
+            addPopulation(1)
             autoAssignPopulation()
             cityInfo.civInfo.addNotification("[${cityInfo.name}] has grown!", cityInfo.location, NotificationIcon.Growth)
         }
@@ -71,10 +76,25 @@ class PopulationManager {
 
     private fun getStatsOfSpecialist(name: String) = cityInfo.cityStats.getStatsOfSpecialist(name)
 
+    internal fun addPopulation(count: Int) {
+        val changedAmount = 
+            if (population + count < 0) -population
+            else count
+        population += changedAmount
+        val freePopulation = getFreePopulation()
+        if (freePopulation < 0) {
+            unassignExtraPopulation()
+        } else {
+            autoAssignPopulation()
+        }
+        
+        cityInfo.religion.updatePressureOnPopulationChange(changedAmount)
+    }
+    
+    internal fun setPopulation(count: Int) {
+        addPopulation(-population + count)
+    }
 
-    // todo - change tile choice according to city!
-    // if small city, favor production above all, ignore gold!
-    // if larger city, food should be worth less!
     internal fun autoAssignPopulation(foodWeight: Float = 1f) {
         for (i in 1..getFreePopulation()) {
             //evaluate tiles

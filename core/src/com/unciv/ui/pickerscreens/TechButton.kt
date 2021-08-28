@@ -12,19 +12,26 @@ class TechButton(techName:String, private val techManager: TechManager, isWorldS
 
     init {
         touchable = Touchable.enabled
-        background = ImageGetter.getRoundedEdgeTableBackground()
+        background = ImageGetter.getRoundedEdgeRectangle()
         pad(10f)
 
         if (ImageGetter.techIconExists(techName))
             add(ImageGetter.getTechIconGroup(techName, 60f)).left()
 
         val rightSide = Table()
-        val techCost = techManager.costOfTech(techName)
-        val remainingTech = techManager.remainingScienceToTech(techName)
 
         if (isWorldScreen) {
+            val techCost = techManager.costOfTech(techName)
+            val remainingTech = techManager.remainingScienceToTech(techName)
+            val techThisTurn = techManager.civInfo.statsForNextTurn.science
+
             val percentComplete = (techCost - remainingTech) / techCost.toFloat()
-            add(ImageGetter.getProgressBarVertical(2f, 50f, percentComplete, Color.BLUE, Color.WHITE)).pad(10f)
+            val percentWillBeComplete = (techCost - (remainingTech-techThisTurn)) / techCost.toFloat()
+            val progressBar = ImageGetter.VerticalProgressBar(2f, 50f)
+                    .addColor(Color.WHITE, 1f)
+                    .addColor(Color.BLUE.cpy().lerp(Color.WHITE, 0.3f), percentWillBeComplete)
+                    .addColor(Color.BLUE.cpy().lerp(Color.BLACK, 0.5f), percentComplete)
+            add(progressBar.addBorder(1f, Color.GRAY)).pad(10f)
             rightSide.add(text).padBottom(5f).row()
         } else rightSide.add(text).height(25f).padBottom(5f).row()
 
@@ -44,16 +51,13 @@ class TechButton(techName:String, private val techManager: TechManager, isWorldS
 
         val tech = ruleset.technologies[techName]!!
 
-        for (unit in tech.getEnabledUnits(techManager.civInfo)
-                .filter { "Will not be displayed in Civilopedia" !in it.uniques })
+        for (unit in tech.getEnabledUnits(techManager.civInfo))
             techEnabledIcons.add(ImageGetter.getConstructionImage(unit.name).surroundWithCircle(techIconSize))
 
-        for (building in tech.getEnabledBuildings(techManager.civInfo)
-                .filter { "Will not be displayed in Civilopedia" !in it.uniques })
+        for (building in tech.getEnabledBuildings(techManager.civInfo))
             techEnabledIcons.add(ImageGetter.getConstructionImage(building.name).surroundWithCircle(techIconSize))
 
-        for (building in tech.getObsoletedBuildings(techManager.civInfo)
-                .filter { "Will not be displayed in Civilopedia" !in it.uniques })
+        for (building in tech.getObsoletedBuildings(techManager.civInfo))
             techEnabledIcons.add(ImageGetter.getConstructionImage(building.name).surroundWithCircle(techIconSize).apply {
                 val closeImage = ImageGetter.getImage("OtherIcons/Close")
                 closeImage.setSize(techIconSize / 2, techIconSize / 2)
